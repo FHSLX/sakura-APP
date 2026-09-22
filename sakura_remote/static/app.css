@@ -1366,15 +1366,24 @@ body.show-original-fallback .textOriginal {
  *   - 手机桌面立绘（悬浮窗）= 看角色，一次只显示一条气泡
  *   - App = 看对话历史，左侧角色、右侧自己，可翻阅
  * 两者共用同一份 HTML，所以用 :not(.overlay-mode) 区分。
+ *
+ * 重要：小球模式（bubble-mode）是**独立模式**，不带 overlay-mode！
+ * 所以下面每条规则都必须同时排除 .bubble-mode，否则会把小球的
+ * 立绘一起隐藏掉（实测：#stage / #portraitWrap 变成 display:none，
+ * 窗口还在但里面什么都没有，看起来就是「缩小后图标消失」）。
  * ============================================================ */
 
-/* 立绘和相关装饰全部去掉 */
-body:not(.overlay-mode) #stage,
-body:not(.overlay-mode) #backdrop,
-body:not(.overlay-mode) #portraitWrap,
-body:not(.overlay-mode) #portraitShade,
-body:not(.overlay-mode) #hint,
-body:not(.overlay-mode) #miniBar {
+/* 立绘和相关装饰全部去掉。
+   注意三个模式的互斥关系：
+     overlay-mode —— 桌面立绘，要显示立绘
+     bubble-mode  —— 圆形小球，也要显示（裁成圆的）
+     都没有       —— App 内，去掉立绘改看历史 */
+body:not(.overlay-mode):not(.bubble-mode) #stage,
+body:not(.overlay-mode):not(.bubble-mode) #backdrop,
+body:not(.overlay-mode):not(.bubble-mode) #portraitWrap,
+body:not(.overlay-mode):not(.bubble-mode) #portraitShade,
+body:not(.overlay-mode):not(.bubble-mode) #hint,
+body:not(.overlay-mode):not(.bubble-mode) #miniBar {
   display: none;
 }
 
