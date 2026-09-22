@@ -405,14 +405,12 @@ sakura.host.mobile  →  电脑端对话模型（含长期记忆）
 每段日文原文 + 语气 → 电脑端 TTS → WAV 回传 → 手机播放
 ```
 
-### 一些踩过的坑
+### 开发时最容易踩的两个坑
 
-项目里记录了若干**真实踩坑过程**，对想改这个项目的人应该有用：
-
-- [为什么点击穿透要按像素判断](sakura_remote/README.md#点击穿透透明处让给桌面)
-- [为什么远程重启要分两段计划任务](sakura_remote/README.md#远程重启)
-- [为什么卡片会压住输入栏](sakura_remote/README.md#宽度区分目标宽度和当前视口)
-- [Android 14 的 MediaProjection 前台服务要求](phone_app/README.md)
+- **Android 14 起 MediaProjection 必须跑在 `mediaProjection` 类型的前台服务里**，
+  在 Activity 回调里直接建 VirtualDisplay 会失败。见 [phone_app/README.md](phone_app/README.md)
+- **`screen.width` 和 `window.innerWidth` 不是一回事**：悬浮窗的实际视口可能比屏幕窄
+  （实测屏幕 393 而窗口 319），混用会把控件挤出屏幕。见 [sakura_remote/README.md](sakura_remote/README.md)
 
 ---
 
