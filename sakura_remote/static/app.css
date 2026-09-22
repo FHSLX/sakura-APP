@@ -1,0 +1,1502 @@
+:root {
+  --primary: #d55b91;
+  --primary-hover: #bf3f7a;
+  --accent: #b13e73;
+  --text: #3d2b35;
+  --secondary-text: #7a3656;
+  --muted-text: #9b4f72;
+  --page-bg: #fff6fa;
+  --panel-bg: #ffe8f1;
+  --input-bg: #ffffff;
+  --bubble-bg: #ffe8f1;
+  --border: #eeacc8;
+  --stage-bg: #fff6fa;
+  color-scheme: light;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif;
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--stage-bg);
+  color: var(--text);
+  overscroll-behavior: none;
+}
+
+/* ---- 立绘舞台 ---- */
+#stage {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: auto;
+}
+
+#backdrop {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(120% 80% at 50% 0%, rgba(255, 255, 255, 0.85) 0%, rgba(255, 255, 255, 0) 60%),
+    radial-gradient(90% 60% at 50% 100%, var(--panel-bg) 0%, rgba(255, 255, 255, 0) 70%),
+    var(--stage-bg);
+}
+
+/*
+ * CSS 变量默认不能插值，用 @property 声明成 <length> 之后
+ * keyframes 才能平滑改变它（呼吸/说话动画靠这个）。
+ */
+@property --pet-lift {
+  syntax: '<length>';
+  inherits: false;
+  initial-value: 0px;
+}
+@property --pet-scale {
+  syntax: '<number>';
+  inherits: false;
+  initial-value: 1;
+}
+
+/*
+ * 立绘缩放：外层容器负责「居中 + 缩放」，内层 img 负责呼吸动画。
+ *
+ * 必须拆成两层：transform 是同一个属性，如果缩放和动画都写它，
+ * 动画运行期间会覆盖缩放值，表现为「滑块动了角色大小不变」。
+ * 缩放也不能用 height/width —— 带常驻动画的元素会被 Chromium 合成层接管尺寸。
+ */
+#portraitWrap {
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+  transform: translateX(-50%) scale(var(--pet-scale, 1));
+  transform-origin: bottom center;
+  transition: transform 240ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+
+#portrait {
+  height: 100%;
+  width: auto;
+  max-width: none;
+  max-height: none;
+  object-fit: contain;
+  object-position: bottom center;
+  --pet-lift: 0px;
+  transform: translateY(var(--pet-lift));
+  transition: opacity 260ms ease;
+  animation: breathe 5.5s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+#portrait.switching { opacity: 0; }
+#portrait.speaking { animation: speak 1.1s ease-in-out infinite; }
+
+@keyframes breathe {
+  0%, 100% { --pet-lift: 0px; }
+  50% { --pet-lift: -10px; }
+}
+
+@keyframes speak {
+  0%, 100% { --pet-lift: 0px; }
+  50% { --pet-lift: -6px; }
+}
+
+/* ---- 悬浮窗模式（?mode=overlay）----
+ *
+ * 让同一个页面在「桌面悬浮窗」里也好看：背景透明、立绘铺满、
+ * 对话气泡叠在立绘上、输入栏贴底，并留出顶部拖动条和右下角缩放手柄。
+ * 复用整套逻辑（聊天/语气/语音/上传），不重写第二套界面。
+ */
+/* 悬浮窗必须真正透明：否则会在桌面上糊一个白色方块。
+   注意 html 也要一起透明 —— 只改 body 的话 html 的底色仍会透出来。 */
+html.overlay-mode,
+body.overlay-mode {
+  background: transparent;
+}
+
+body.overlay-mode #stage,
+body.overlay-mode #backdrop,
+body.overlay-mode #portraitShade {
+  background: transparent;
+}
+
+/* 立绘保持原样。
+ * 曾经用过 mix-blend-mode: multiply 想去掉立绘自带的白底，
+ * 但副作是整个角色都变半透明。正确做法是让 PNG 自己带透明通道，
+ * 不要用混合模式去「抠图」。 */
+body.overlay-mode #portrait {
+  mix-blend-mode: normal;
+  filter: drop-shadow(0 2px 10px rgba(120, 60, 95, 0.18));
+}
+
+/* 原生标题栏占据顶部，网页内容要往下让开，否则会被压住 */
+body.overlay-mode #topbar {
+  padding: 26px 8px 2px;
+  background: transparent;
+  gap: 6px;
+}
+
+body.overlay-mode #backdrop {
+  /* 悬浮窗要能透出桌面，底色必须透明 */
+  background: transparent;
+}
+
+body.overlay-mode #portraitShade {
+  /* 透明窗口里再压一层渐隐就成白雾了，直接去掉 */
+  display: none;
+}
+
+/* 顶栏在悬浮窗里整条去掉。
+ * 原来上面有「设置/语音/清屏」和一排拖动提示，既占地方又像一条边框。
+ * 现在：长按立绘 5 秒开设置，语音/清屏都在设置页里。 */
+body.overlay-mode #topbar,
+body.overlay-mode #windowChrome {
+  display: none;
+}
+
+body.overlay-mode #name { display: none; }
+
+body.overlay-mode #controls {
+  margin-left: auto;
+  gap: 4px;
+}
+
+body.overlay-mode .iconButton {
+  padding: 3px 9px;
+  font-size: 12px;
+  background: color-mix(in srgb, var(--input-bg) 78%, transparent);
+}
+
+/* 气泡区：居中靠下，宽度跟随立绘。
+ * 宽度用 --pet-content-w（由 JS 按立绘实际渲染宽度设置），
+ * 所以拖动放大/-缩小立绘时，气泡和输入框会一起变宽变窄。 */
+/* ---- 悬浮窗三段式布局（参考电脑端）----
+ *
+ *   立绘（占满上方）
+ *   ┌──────────────────────────┐
+ *   │ 对话框文字        ▲ ▼    │  ← 切换按钮竖排在对话框右边缘内
+ *   └──────────────────────────┘
+ *   输入栏
+ *
+ * 关键：对话框在立绘下方、不叠在立绘上，所以不会遮住角色；
+ * 切换按钮放在对话框里，也就不会浮在立绘上挡脸。
+ */
+#msgNav { display: none; }
+
+/* 窗口纵向三段：立绘 / 对话框 / 输入栏。
+ * 立绘占满剩余高度，对话框和输入栏按内容高度 —— 所以对话框不会压住立绘。 */
+body.overlay-mode {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+body.overlay-mode #stage {
+  position: relative;
+  inset: auto;
+  /* 高度按 JS 算出的可用高度走（屏幕高 - 卡片 - 输入栏）。
+     用 flex 剩余空间的话，卡片和输入栏的实际高度会有出入，
+     立绘就容易被挤到压住卡片。 */
+  flex: 0 0 auto;
+  height: var(--pet-avail-h, 300px);
+  min-height: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  overflow: hidden;
+}
+
+body.overlay-mode #msgNav {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 4px;
+  flex: 0 0 auto;
+  margin: 0 auto;
+  width: var(--pet-content-w, 100%);
+  max-width: var(--pet-content-w, 100%);
+  padding: 8px 6px 8px 12px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  background: color-mix(in srgb, var(--input-bg) 92%, transparent);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 4px 14px rgba(120, 60, 95, 0.14);
+  /*
+   * height 是 JS 按内容实测算出来的目标高度。
+   *
+   * max-height 是**硬上限**，兜住 height 算大了的情况。
+   * 为什么必须有：--pet-nav-h 由 JS 写入，一旦超过「视口 − 立绘 − 输入栏」，
+   * 卡片就会盖住输入栏。实测长消息时 nav=358 而可用只剩 328，
+   * 重叠 30px，输入框被压住看不见。
+   *
+   * 用 dvh 而不是 vh：移动端 vh 在地址栏收放时不更新，dvh 跟随实际视口。
+   * 超出部分本来就在 #msgText 里滚动，所以收窄不会丢内容。
+   *
+   * 减到 0 而不是留 24px 余量：--pet-avail-h 已经包含立绘区域，
+   * composer-h 已经含输入栏与提示条，各段间距由 flex 的 gap 处理。
+   * 实测留 24px 反而让卡片多占 18px，正好压住输入栏顶部。
+   */
+  max-height: calc(100dvh - var(--pet-avail-h, 0px) - var(--pet-composer-h, 70px));
+  height: var(--pet-nav-h, 220px);
+  overflow: hidden;
+}
+
+body.overlay-mode #msgNav.hidden { display: none; }
+
+/*
+ * 自动隐藏：用 opacity/transform 而不是 display:none。
+ *
+ * 为什么不用 display:none —— 那会让卡片高度归零，窗口尺寸跟着变，
+ * 触发一次重新布局，表现为「对话框消失时整个窗口抖一下」。
+ * 保留占位只是看不见，位置就稳。
+ *
+ * 隐藏后 pointer-events 关掉，否则看不见的卡片还会挡住底下的点击。
+ */
+body.overlay-mode #msgNav.auto-hidden {
+  opacity: 0;
+  transform: translateY(6px);
+  pointer-events: none;
+  transition: opacity 260ms ease, transform 260ms ease;
+}
+
+body.overlay-mode #msgNav.auto-hidden-now {
+  transition: none;
+}
+
+/* 显示时也带一点过渡，避免突然弹出 */
+body.overlay-mode #msgNav:not(.auto-hidden):not(.auto-hidden-now) {
+  transition: opacity 200ms ease, transform 200ms ease;
+}
+
+/* 对话框文字区：按内容高度，超出在内部滚动。
+ * 用 flex:1 会让卡片吃掉 stage 让出的空间（实测卡片被拉到 260 高，
+ * 又把输入栏压住）。卡片高度由 --pet-nav-h 固定，这里只管滚动。 */
+body.overlay-mode #msgText {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+body.overlay-mode #msgName {
+  margin-bottom: 3px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--primary);
+}
+
+body.overlay-mode #msgBody {
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--text);
+  word-break: break-word;
+}
+
+body.overlay-mode #msgBody .textOriginal {
+  font-size: 12px;
+  line-height: 1.45;
+  opacity: 0.72;
+  margin-bottom: 4px;
+}
+
+body.overlay-mode #msgBody.user { color: var(--secondary-text); }
+
+/* 切换按钮：竖排贴右边缘，和电脑端一致 */
+body.overlay-mode #msgButtons {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+}
+
+body.overlay-mode #msgButtons button {
+  width: 30px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--input-bg) 60%, transparent);
+  color: var(--primary);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+body.overlay-mode #msgButtons button:disabled { opacity: 0.28; }
+
+body.overlay-mode #msgButtons button:active { transform: scale(0.94); }
+
+/* 悬浮窗里不再用原始气泡列表（改由上面的对话框卡片呈现），
+   但节点保留在 DOM 里 —— 语音播放和语气表情都依赖它们。 */
+body.overlay-mode #bubbles {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* 气泡本身居中靠下排列（助手气泡靠左但整体居中收窄） */
+body.overlay-mode .bubbleRow {
+  justify-content: center;
+}
+
+body.overlay-mode .bubbleRow.user {
+  justify-content: center;
+}
+
+body.overlay-mode .bubble {
+  max-width: 100%;
+}
+
+body.overlay-mode .bubble {
+  background: color-mix(in srgb, var(--input-bg) 74%, transparent);
+  backdrop-filter: blur(10px);
+  border-color: color-mix(in srgb, var(--border) 70%, transparent);
+  box-shadow: 0 4px 14px rgba(120, 60, 95, 0.14);
+}
+
+body.overlay-mode .bubbleRow.assistant .bubble {
+  background: color-mix(in srgb, var(--bubble-bg) 70%, transparent);
+}
+
+body.overlay-mode #composer {
+  /* 三段式里它是第三段，按内容高度排在最下面（不再绝对定位叠在立绘上） */
+  flex: 0 0 auto;
+  margin: 0 auto;
+  width: var(--pet-content-w, 100%);
+  max-width: var(--pet-content-w, 100%);
+  padding: 6px 8px 6px;
+  /* 这里原来是一层底色渐变，在透明窗口里会显成白块 */
+  background: transparent;
+}
+
+body.overlay-mode #text {
+  min-height: 38px;
+  padding: 8px 10px;
+  /* 输入框自己保持不透明，否则看不清字 */
+  background: color-mix(in srgb, var(--input-bg) 94%, transparent);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 4px 14px rgba(120, 60, 95, 0.16);
+}
+
+body.overlay-mode #send,
+body.overlay-mode .mediaButton {
+  height: 38px;
+}
+
+body.overlay-mode .mediaButton { width: 38px; }
+
+/* 悬浮窗里的按钮排版：等宽等高、字形统一、按下有反馈。
+ * 透明背景上按钮必须自带底色，否则文字会糊在立绘上看不清。 */
+body.overlay-mode .mediaButton,
+body.overlay-mode #send {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  padding: 0;
+  border-radius: 12px;
+}
+
+body.overlay-mode .mediaButton {
+  background: color-mix(in srgb, var(--input-bg) 92%, transparent);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 3px 10px rgba(120, 60, 95, 0.14);
+  color: var(--secondary-text);
+}
+
+body.overlay-mode #send {
+  padding: 0 14px;
+  box-shadow: 0 3px 10px rgba(160, 60, 110, 0.28);
+}
+
+body.overlay-mode .mediaButton:active,
+body.overlay-mode #send:active {
+  transform: scale(0.95);
+}
+
+/* 无承托的文字（气泡外）加阴影，保证在立绘上可读 */
+body.overlay-mode #status {
+  text-shadow: 0 1px 3px rgba(255, 255, 255, 0.9);
+}
+
+/* 语音解锁提示：做成浮在对话框上方的窄条，不占布局高度。
+ * 占高度的话它会改变 chromeH，而 chromeH 又参与窗口高度计算 ——
+ * 实测这会造成 measure() 每次算出不同高度（694/652/592/610…）来回抖。 */
+body.overlay-mode #hint {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(var(--pet-composer-h, 96px) + var(--pet-nav-h, 240px) + 8px);
+  z-index: 5;
+  width: var(--pet-content-w, 100%);
+  max-width: var(--pet-content-w, 100%);
+  padding: 4px 10px;
+  border-radius: 10px;
+  font-size: 12px;
+  text-align: center;
+  color: var(--secondary-text);
+  background: color-mix(in srgb, var(--input-bg) 78%, transparent);
+  text-shadow: none;
+  pointer-events: none;
+}
+
+body.overlay-mode #configPanel { top: 0; }
+
+/* 窗口把手已废弃：拖动改成长按立绘（网页发指令给原生），缩放手柄也去掉了。
+ * 这些元素仍在 DOM 里（页面骨架保留），统一隐藏，避免顶部多出一条横条。 */
+#windowChrome,
+#dragHandle,
+#resizeHandle {
+  display: none !important;
+}
+
+/* 悬浮窗里立绘由 JS 精确定尺寸并做缩放。
+ *
+ * 容器已经是「适配窗口」的尺寸，缩放用变量而不是固定像素 ——
+ * 这样滑块才真正有效，同时不会超出容器被裁。 */
+body.overlay-mode #portraitWrap {
+  position: relative;
+  left: auto;
+  bottom: auto;
+  margin: 0 auto;
+  /* 尺寸完全由 flex 分配（stage 的高度、内容宽度），不写死像素 ——
+     写死会和实际分配不一致，超出的部分会压住下面的对话框。 */
+  width: 100%;
+  height: 100%;
+  transform: scale(var(--pet-scale, 1));
+  transform-origin: 50% 100%;
+}
+
+body.overlay-mode #portrait {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: 50% 100%;
+}
+
+/* token 那一行：值 + 显示/复制两个小按钮 */
+.tokenValue {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.tokenValue #connToken {
+  /* 长 token 要能换行显示，别把按钮挤出去 */
+  word-break: break-all;
+  text-align: right;
+}
+
+.tokenValue #connToken.tokenPlain {
+  /* 明文模式用等宽字体，方便核对字符 */
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.miniButton {
+  padding: 3px 8px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--input-bg) 92%, transparent);
+  color: var(--primary);
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.miniButton:active { transform: scale(0.95); }
+
+.miniButton:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ---- 角色列表 ---- */
+.charList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.charRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--input-bg) 90%, transparent);
+  color: var(--text);
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.charRow:active { transform: scale(0.99); }
+
+.charRow.current {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  cursor: default;
+}
+
+.charName {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.charId {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--secondary-text);
+  font-family: ui-monospace, Consolas, monospace;
+}
+
+.charBadge {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--primary);
+  color: #fff;
+  font-size: 11px;
+}
+
+/* 已写入配置、等待重启生效的角色 */
+.charRow.pending {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.pendingBadge {
+  background: var(--accent);
+}
+
+.charRow:disabled { opacity: 1; }
+
+/* ---- 数字输入框与数值文字 ----
+ * 滑块负责粗调，数字框负责精调（可以直接敲数字）。
+ * 输入框宽度固定，避免数值变化时布局跳动。
+ */
+.numberInput {
+  width: 62px;
+  min-width: 62px;
+  padding: 6px 6px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--input-bg) 92%, transparent);
+  color: var(--text);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  /* 去掉 spinner，移动端屏幕窄，箭头很占地方 */
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+.numberInput::-webkit-outer-spin-button,
+.numberInput::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.numberInput:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 24%, transparent);
+}
+
+.valueText {
+  min-width: 38px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--secondary-text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 控件行不换行：卡片列可能很窄，换行会把数值挤到第二行、看起来像两个控件 */
+.scaleRow {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: nowrap;
+}
+
+.scaleRow input[type="range"] {
+  flex: 1 1 auto;
+  min-width: 40px;
+  width: 100%;
+}
+
+/* 标签行：让数值靠右，和下面的控件分开，避免占控件行的宽度 */
+.fieldLabel {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* ---- 悬浮窗微调：立绘位置 / 浮动开关 / 字号 / 对话框位移 ----
+ *
+ * 全部用 CSS 变量驱动，网页只负责改变量值。
+ * 对话框位移只作用在悬浮窗（App 里是整屏布局，不需要微调）。
+ */
+
+/* 立绘位置：--pet-pan-y 由 JS 按立绘高度换算成像素。
+ * 用像素而不是百分比：立绘高度是 flex 分配的，百分比基准不稳定，
+ * 实测「调了没反应」。这里再叠上呼吸动画的 --pet-lift。 */
+body.overlay-mode #portrait {
+  transform: translate(var(--pet-pan-x, 0px), var(--pet-pan-y, 0px))
+             translateY(var(--pet-lift, 0px));
+}
+
+/* 关掉上下浮动。
+ * 要显式带上 .overlay-mode：否则和上面的规则同特异性，谁生效取决于先后顺序，
+ * 很容易出现「开关点了没反应」。同时把两种动画都停掉，
+ * 并把位置偏移原样保留（只是不浮动）。 */
+body.overlay-mode.no-float #portrait,
+body.no-float #portrait {
+  animation: none;
+  transform: translate(var(--pet-pan-x, 0px), var(--pet-pan-y, 0px));
+}
+
+/* 字体大小：只影响对话框里的文字 */
+body.overlay-mode #msgBody {
+  font-size: calc(15px * var(--pet-font-scale, 1));
+}
+
+body.overlay-mode #msgBody .textOriginal {
+  font-size: calc(12px * var(--pet-font-scale, 1));
+}
+
+body.overlay-mode #msgName {
+  font-size: calc(12px * var(--pet-font-scale, 1));
+}
+
+/* 对话框位置微调（像素） */
+body.overlay-mode #msgNav {
+  margin-left: var(--pet-dialog-x, 0px);
+  margin-bottom: var(--pet-dialog-y, 0px);
+}
+
+/* ---- 单句气泡 + 历史切换（只在悬浮模式）----
+ *
+ * 悬浮窗里气泡区很窄，一次显示整段历史会把立绘完全盖住。
+ * 所以只显示当前这一句，用上下按钮翻。
+ * 完整对话历史在 App 内查看。
+ *
+ * 注意：这套样式已经合并到上面的「悬浮窗三段式布局」里了，
+ * 旧的顶部胶囊版本已删除（留着会打架，且按钮会浮在立绘上挡脸）。
+ */
+
+/* 悬浮窗里一次只显示一条：其余用 class 控制 */
+body.overlay-mode .bubbleRow {
+  display: none;
+}
+
+body.overlay-mode .bubbleRow.current {
+  display: flex;
+  animation: rise 160ms ease both;
+}
+
+/* ---- 缩小为小球：只在悬浮模式出现 ---- */
+
+body.overlay-mode .miniBar {
+  display: flex;
+  justify-content: flex-end;
+  flex: 0 0 auto;
+  width: var(--pet-content-w, 100%);
+  max-width: var(--pet-content-w, 100%);
+  margin: 0 auto;
+  padding: 0 0 2px;
+}
+
+.miniBar.hidden { display: none; }
+/* 非悬浮模式（配置页/App 内）不需要这个按钮 */
+body:not(.overlay-mode) .miniBar { display: none; }
+
+#miniButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 10px;
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--input-bg) 90%, transparent);
+  backdrop-filter: blur(10px);
+  color: var(--secondary-text);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+#miniButton:active {
+  transform: scale(0.95);
+  background: color-mix(in srgb, var(--primary) 16%, transparent);
+}
+
+/* ---- 迷你图标模式（?mode=bubble）----
+ *
+ * 最小化后只剩一个圆形的角色头像当图标，点它恢复完整窗口。
+ * 复用同一个页面和同一张立绘，不需要额外接口。
+ */
+html.bubble-mode,
+body.bubble-mode {
+  background: transparent;
+  overflow: hidden;
+}
+
+body.bubble-mode #windowChrome,
+body.bubble-mode #topbar,
+body.bubble-mode #bubbles,
+body.bubble-mode #composer,
+body.bubble-mode #hint,
+body.bubble-mode .miniBar,
+body.bubble-mode #configPanel,
+body.bubble-mode #portraitShade {
+  display: none;
+}
+
+body.bubble-mode #stage {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+}
+
+body.bubble-mode #backdrop { display: none; }
+
+body.bubble-mode #portraitWrap {
+  position: relative;
+  left: auto;
+  bottom: auto;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--input-bg) 88%, transparent);
+  box-shadow: 0 4px 16px rgba(120, 60, 95, 0.3);
+  transform: none;
+}
+
+/*
+ * 只露出**头部**当头像。尺寸是按实测算的，不是试出来的：
+ *
+ *   立绘原始 1316×1376，内容垂直分布（每 10% 高度的不透明占比）：
+ *   87 / 194 / 255 / 266 / 269 / 282 / 0 / 0 / 0 / 0
+ *   —— 顶部约 7% 是空白，第 6 段之后全空。
+ *   小球窗口 56dp = 56 CSS px。
+ *
+ * width:150% → 图片 84×88。用 object-position:50% 100%（下边对齐）时，
+ * 取到的是图片最下方 56/88 = 64% 起……那样是空的。所以改用
+ * object-position:50% 0% 取顶部，再用 translateY 把下巴以下对齐圆底，
+ * 露出的正好是「顶部空白 + 头部」这一段。
+ *
+ * 之前 width:200% 时水平方向只有 56/112 = 50% 宽度，头部比圆宽，
+ * 结果只截到脸中心一小块，看上去就是衣服（认不出角色）。
+ */
+body.bubble-mode #portrait {
+  width: 150%;
+  height: auto;
+  max-width: none;
+  max-height: none;
+  object-fit: cover;
+  object-position: 50% 0%;
+  mix-blend-mode: normal;
+  /* 把图片往下推，让头部（原图最上方）落进圆里。
+     实测 translateY(-14%) 露出的是躯干，脸上的部分只剩最顶端一条。 */
+  transform: translateY(16%);
+}
+
+body.bubble-mode #portraitWrap:active { transform: scale(0.94); }
+
+/* ---- 配置页 ---- */
+
+/* 双语字幕：日文原文与中文译文各自可开关。
+ * 两个都关掉时气泡里会没有文字，所以 JS 侧会兜底（见 applySubtitlePrefs）。 */
+body.hide-original .textOriginal { display: none; }
+body.hide-original .textTranslation {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+body.hide-translation .textTranslation { display: none; }
+
+/* 只剩日文原文时把它当正文显示（原来的次要样式太小太淡） */
+body.hide-translation .textOriginal {
+  display: block;
+  margin-top: 0;
+  font-size: 15px;
+  opacity: 1;
+  color: var(--text);
+}
+
+/* 两种字幕都关掉时兜底只留日文原文，避免空气泡 */
+body.show-original-fallback .textTranslation { display: none; }
+body.show-original-fallback .textOriginal {
+  display: block;
+  margin-top: 0;
+  font-size: 15px;
+  opacity: 1;
+  color: var(--text);
+}
+
+#configPanel {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  /* 兜底：无论哪个子元素算宽了，都不让它把面板撑出视口 */
+  width: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
+  background: color-mix(in srgb, var(--stage-bg) 92%, transparent);
+  backdrop-filter: blur(6px);
+  animation: fadeIn 160ms ease both;
+}
+
+#configPanel.hidden { display: none; }
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+#configHeader {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: calc(env(safe-area-inset-top, 0px) + 14px) 16px 12px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--input-bg) 92%, transparent);
+}
+
+#configTitle {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--secondary-text);
+}
+
+#configSubtitle {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--muted-text);
+}
+
+#configHeader .iconButton { flex: 0 0 auto; margin-left: auto; }
+
+#configBody {
+  flex: 1 1 auto;
+  /* 关键：flex 子项默认 min-width:auto，内容偏宽时会把容器撑出视口，
+     表现为右侧卡片被裁掉。必须显式归零。 */
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 14px 16px calc(env(safe-area-inset-bottom, 0px) + 24px);
+}
+
+.configGrid {
+  display: grid;
+  /* minmax(0, 1fr) 而不是 1fr：否则长内容（如 token、IP）会把列撑破 */
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  width: 100%;
+  max-width: 1280px;
+  min-width: 0;
+  margin: 0 auto;
+}
+
+.configCard {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: 14px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--input-bg) 95%, transparent);
+  box-shadow: 0 6px 18px rgba(120, 60, 95, 0.08);
+}
+
+.configCard.unsupported { opacity: 0.6; }
+
+.cardTitle {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--secondary-text);
+}
+
+.settingLabel {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  color: var(--secondary-text);
+}
+
+.kv {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.kvKey { flex: 0 0 auto; color: var(--muted-text); }
+.kvValue {
+  flex: 1 1 auto;
+  text-align: right;
+  color: var(--text);
+  word-break: break-all;
+  font-variant-numeric: tabular-nums;
+}
+
+.switchRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  color: var(--text);
+  padding: 8px 0;
+}
+
+.switchRow input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--primary);
+  flex: 0 0 auto;
+}
+
+.guideList {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text);
+}
+
+.guideList b { color: var(--secondary-text); }
+
+.guideList code {
+  background: var(--bubble-bg);
+  border-radius: 5px;
+  padding: 1px 5px;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+/* ---- 13 寸等大屏适配 ---- */
+/* 平板/大屏：卡片两列排布，利用横向空间；正文也适当放大，避免在大屏上显得过小 */
+@media (min-width: 760px) {
+  .configGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+  .configCardWide { grid-column: 1 / -1; }
+  .cardTitle { font-size: 15px; }
+  .kv, .settingHint, .guideList { font-size: 14px; }
+  #configTitle { font-size: 20px; }
+  #configSubtitle { font-size: 13px; }
+  #configBody { padding: 18px 24px calc(env(safe-area-inset-bottom, 0px) + 28px); }
+}
+
+/* 13 寸横屏：三列 + 更宽松的留白 */
+@media (min-width: 1100px) {
+  .configGrid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
+  .configCardWide { grid-column: 1 / -1; }
+  .configCard { padding: 18px; border-radius: 16px; }
+  #configHeader { padding: calc(env(safe-area-inset-top, 0px) + 18px) 32px 14px; }
+  #configBody { padding: 20px 32px calc(env(safe-area-inset-bottom, 0px) + 32px); }
+  .guideList { font-size: 14.5px; line-height: 1.75; }
+}
+
+/* 大屏上把立绘靠左、聊天靠右，避免角色被中间的气泡完全遮住 */
+@media (min-width: 1000px) {
+  #portraitWrap { left: 26%; }
+  #bubbles { max-width: 620px; margin-left: auto; margin-right: 4vw; }
+  #composer { max-width: 760px; margin-left: auto; margin-right: 4vw; }
+}
+
+.settingGroup { display: flex; flex-direction: column; gap: 8px; }
+.settingGroup.unsupported { opacity: 0.55; }
+
+.settingTitle {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--secondary-text);
+}
+
+.settingHint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted-text);
+}
+
+.scaleRow {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.scaleRow input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 26px;
+  background: transparent;
+}
+
+.scaleRow input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--border) 80%, transparent);
+}
+
+.scaleRow input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  margin-top: -8px;
+  border-radius: 50%;
+  background: var(--primary);
+  border: 2px solid #fff;
+  box-shadow: 0 2px 6px rgba(160, 60, 110, 0.35);
+}
+
+#scaleValue {
+  min-width: 44px;
+  text-align: right;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--secondary-text);
+}
+
+.scaleStep {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--input-bg);
+  color: var(--secondary-text);
+  font-size: 18px;
+  line-height: 1;
+  font-weight: 700;
+}
+
+.scaleStep:active { background: var(--bubble-bg); }
+
+.primaryButton,
+.ghostButton {
+  width: 100%;
+  padding: 11px 14px;
+  border-radius: 12px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.primaryButton {
+  border: 0;
+  background: var(--primary);
+  color: #fff;
+}
+
+.primaryButton:active { background: var(--primary-hover); }
+.primaryButton.on { background: var(--muted-text); }
+
+.ghostButton {
+  border: 1px solid var(--border);
+  background: var(--input-bg);
+  color: var(--secondary-text);
+}
+
+.ghostButton:active { background: var(--bubble-bg); }
+.ghostButton.on { border-color: var(--accent); color: var(--accent); }
+
+.primaryButton:disabled,
+.ghostButton:disabled { opacity: 0.5; }
+
+.iconButton.on {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--bubble-bg) 90%, transparent);
+}
+
+#portraitShade {
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 34%;
+  background: linear-gradient(to top, var(--stage-bg) 4%, rgba(255, 255, 255, 0) 100%);
+  pointer-events: none;
+}
+
+/* ---- 顶栏 ---- */
+#topbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: calc(env(safe-area-inset-top, 0px) + 10px) 14px 10px;
+  background: linear-gradient(to bottom, color-mix(in srgb, var(--stage-bg) 92%, transparent), transparent);
+}
+
+#name {
+  flex: 1;
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--secondary-text);
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+
+#controls { display: flex; gap: 8px; }
+
+.iconButton {
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--input-bg) 88%, transparent);
+  color: var(--secondary-text);
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.iconButton.off { opacity: 0.5; }
+
+/* ---- 气泡 ---- */
+#bubbles {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 108px);
+  /* 留出足够高度给多段长回复，同时不把立绘的脸整个盖住 */
+  max-height: 52vh;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 6px 14px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  mask-image: linear-gradient(to bottom, transparent 0, #000 14px);
+  scrollbar-width: none;
+}
+
+#bubbles::-webkit-scrollbar { display: none; }
+
+.bubbleRow { display: flex; animation: rise 260ms ease both; }
+.bubbleRow.user { justify-content: flex-end; }
+
+.bubble {
+  max-width: min(80%, 520px);
+  padding: 10px 14px;
+  border-radius: 16px;
+  line-height: 1.55;
+  font-size: 15px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: color-mix(in srgb, var(--input-bg) 94%, transparent);
+  border: 1px solid var(--border);
+  box-shadow: 0 6px 18px rgba(120, 60, 95, 0.10);
+  backdrop-filter: blur(8px);
+}
+
+.bubbleRow.assistant .bubble {
+  background: color-mix(in srgb, var(--bubble-bg) 92%, transparent);
+  border-color: color-mix(in srgb, var(--border) 70%, transparent);
+}
+
+.bubbleRow.system .bubble {
+  font-size: 13px;
+  color: var(--muted-text);
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+}
+
+.bubble.speaking { border-color: var(--accent); }
+
+/* 桌宠式双行字幕：中文是主体（大），日文原文缩小作为参考 */
+.bubble {
+  display: flex;
+  flex-direction: column;
+}
+
+.textOriginal {
+  order: 1;
+  font-size: 12px;
+  line-height: 1.4;
+  color: color-mix(in srgb, var(--muted-text) 82%, transparent);
+  opacity: 0.72;
+}
+
+.textTranslation {
+  order: 2;
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px dashed color-mix(in srgb, var(--border) 55%, transparent);
+  font-size: 16px;
+  line-height: 1.55;
+  color: var(--text);
+}
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.typing { display: inline-flex; gap: 4px; align-items: center; min-height: 18px; }
+.typing i {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--muted-text); opacity: 0.35;
+  animation: pulse 1s infinite ease-in-out;
+}
+.typing i:nth-child(2) { animation-delay: 0.16s; }
+.typing i:nth-child(3) { animation-delay: 0.32s; }
+
+@keyframes pulse {
+  0%, 80%, 100% { transform: translateY(0); opacity: 0.35; }
+  40% { transform: translateY(-3px); opacity: 0.95; }
+}
+
+/* ---- 提示 ---- */
+#hint {
+  position: fixed;
+  left: 50%;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 168px);
+  transform: translateX(-50%);
+  z-index: 4;
+  padding: 8px 16px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--primary) 90%, transparent);
+  color: #fff;
+  font-size: 13px;
+  display: none;
+  box-shadow: 0 8px 22px rgba(160, 60, 110, 0.25);
+}
+
+#hint.show { display: block; animation: rise 240ms ease both; }
+
+/* ---- 输入栏 ---- */
+#composer {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 3;
+  padding: 8px 12px calc(env(safe-area-inset-bottom, 0px) + 10px);
+  background: linear-gradient(to top, color-mix(in srgb, var(--stage-bg) 96%, transparent) 40%, transparent);
+}
+
+#form {
+  display: grid;
+  /* 三列：媒体菜单(＋) | 输入框 | 发送。
+     原来「图」「截屏」各占一列，悬浮窗很窄时输入框被挤得只剩一点；
+     现在两者收进 ＋ 的下拉菜单，输入框拿到全部剩余宽度。
+     注意列数要和实际控件数一致 —— 多一个控件会把「发送」挤到第二行。 */
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+/* ---- 媒体下拉菜单（图片 / 截屏）---- */
+
+.mediaMenu {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+}
+
+/*
+ * 菜单打开时把输入栏整体提到对话框之上。
+ *
+ * 为什么不能只给 .mediaPanel 设 z-index：#composer 上有 backdrop-filter，
+ * 那会创建一个层叠上下文，子元素的 z-index 再大也出不去
+ *（实测菜单被对话框盖住，挡住了正文最后两行）。
+ * 所以必须提升 #composer 自己。
+ */
+#composer:has(.mediaPanel:not(.hidden)) {
+  z-index: 60;
+}
+
+.mediaPanel {
+  position: absolute;
+  bottom: calc(100% + 6px);   /* 向上展开，不占布局空间 */
+  left: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  min-width: 116px;
+  padding: 4px;
+  gap: 2px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  background: color-mix(in srgb, var(--input-bg) 97%, transparent);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 6px 18px rgba(120, 60, 95, 0.22);
+}
+
+.mediaPanel.hidden { display: none; }
+
+.mediaItem {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  width: 100%;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mediaItem:active {
+  background: color-mix(in srgb, var(--primary) 14%, transparent);
+}
+
+/* ---- 已选内容提示条 ---- */
+
+.mediaInfo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 5px 6px 5px 8px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  background: color-mix(in srgb, var(--input-bg) 92%, transparent);
+  font-size: 12px;
+  color: var(--secondary-text);
+}
+
+.mediaInfo.hidden { display: none; }
+
+.mediaInfoThumb {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  object-fit: cover;
+  background: color-mix(in srgb, var(--border) 30%, transparent);
+}
+
+.mediaInfoText {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mediaInfoClear {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--secondary-text);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.mediaInfoClear:active {
+  background: color-mix(in srgb, var(--primary) 16%, transparent);
+}
+
+#text {
+  min-height: 42px;
+  max-height: 128px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--input-bg) 92%, transparent);
+  color: var(--text);
+  font: inherit;
+  resize: none;
+  outline: none;
+}
+
+#text:focus { border-color: var(--accent); }
+
+#send {
+  border: 0;
+  border-radius: 14px;
+  padding: 0 18px;
+  height: 42px;
+  font-size: 15px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--primary);
+}
+
+#send:active { background: var(--primary-hover); }
+#send:disabled { opacity: 0.55; }
+
+.mediaButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--input-bg) 88%, transparent);
+  color: var(--secondary-text);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.mediaButton.selected { border-color: var(--accent); color: var(--accent); }
+
+.hidden { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+
+#status {
+  min-height: 16px;
+  padding: 4px 2px 0;
+  font-size: 12px;
+  color: var(--muted-text);
+}

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  为什么这里用 base-config 全域放行明文 HTTP，而不是精确到某个 IP：
+
+  Android 的 network-security-config 里 <domain> 只接受域名，不接受 IP 字面量，
+  也不支持 CIDR 网段。而电脑端 Sakura 的地址就是 http://192.168.x.x:8770 这种裸 IP，
+  没有任何域名可用（除非你额外做 Tailscale MagicDNS 之类的名字解析）。
+  所以针对「家里那台电脑的局域网 IP」做精确放行在配置层面无法表达。
+
+  安全边界因此落在别处：
+    1. 手机端只能访问你在连接页里填的那一个地址，不主动访问其他主机；
+    2. 所有接口都要 token（可在 Sakura 的「手机远程端」设置里改成长随机串）；
+    3. 插件默认只监听 127.0.0.1，配合 adb reverse 时根本不出局域网；
+    4. 不要把插件端口映射到公网，外网访问请用 Tailscale Serve 之类的带鉴权隧道。
+
+  如果你的电脑有稳定的域名（例如 Tailscale MagicDNS），可以把下面的 base-config
+  改成 cleartextTrafficPermitted="false"，再用 domain-config 精确放行那个域名。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

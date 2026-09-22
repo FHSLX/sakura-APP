@@ -1,0 +1,19 @@
+{
+  "name": "sakura-remote-shell",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Sakura 手机远程端 WebView 外壳（Capacitor）",
+  "scripts": {
+    "sync": "cap sync android",
+    "open": "cap open android",
+    "build": "cap sync android && cd android && gradlew.bat assembleDebug",
+    "install-apk": "adb install -r android/app/build/outputs/apk/debug/app-debug.apk"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.5.2",
+    "@capacitor/core": "^8.5.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.5.2"
+  }
+}

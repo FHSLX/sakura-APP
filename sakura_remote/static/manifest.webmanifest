@@ -1,0 +1,10 @@
+{
+  "name": "Sakura 手机端",
+  "short_name": "Sakura",
+  "start_url": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#fff6fa",
+  "theme_color": "#fff6fa",
+  "icons": []
+}

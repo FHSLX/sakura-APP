@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#fff6fa">
+<title>Sakura 连接设置</title>
+<style>
+  :root {
+    --pink: #d55b91;
+    --pink-dark: #b13e73;
+    --pink-soft: #ffe8f1;
+    --ink: #3d2b35;
+    --muted: #9b4f72;
+    color-scheme: light;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; min-height: 100%; background: #fff6fa; color: var(--ink); }
+  body {
+    padding: calc(env(safe-area-inset-top, 0px) + 24px) 20px calc(env(safe-area-inset-bottom, 0px) + 24px);
+    display: flex; flex-direction: column; gap: 18px; max-width: 560px; margin: 0 auto;
+  }
+  h1 { font-size: 22px; margin: 0; color: var(--pink-dark); }
+  p.lead { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.6; }
+  label { display: block; font-size: 13px; color: var(--pink-dark); font-weight: 600; margin-bottom: 6px; }
+  input {
+    width: 100%; padding: 12px 14px; font: inherit; font-size: 16px;
+    border: 1px solid #eeacc8; border-radius: 12px; background: #fff; color: var(--ink);
+  }
+  input:focus { outline: none; border-color: var(--pink-dark); }
+  .row { display: flex; gap: 10px; }
+  .row > * { flex: 1; }
+  button {
+    border: 0; border-radius: 12px; padding: 13px 16px; font: inherit; font-size: 16px;
+    font-weight: 600; color: #fff; background: var(--pink);
+  }
+  button.ghost { background: #fff; color: var(--pink-dark); border: 1px solid #eeacc8; }
+  button:active { background: var(--pink-dark); }
+  button.ghost:active { background: var(--pink-soft); }
+  button:disabled { opacity: .55; }
+  #msg { min-height: 22px; font-size: 14px; line-height: 1.5; }
+  #msg.ok { color: #2f7d4f; }
+  #msg.err { color: #c0392b; }
+  .hint { font-size: 12px; color: var(--muted); line-height: 1.6; }
+  code { background: var(--pink-soft); padding: 1px 5px; border-radius: 5px; font-size: 12px; }
+  .card { background: #fff; border: 1px solid #eeacc8; border-radius: 16px; padding: 18px; display: flex; flex-direction: column; gap: 16px; }
+  #recent { display: flex; flex-wrap: wrap; gap: 8px; }
+  #recent button { font-size: 13px; padding: 8px 12px; }
+</style>
+</head>
+<body>
+  <div>
+    <h1>Sakura 手机端</h1>
+    <p class="lead">手机上只负责显示立绘、字幕和播放语音，聊天与语音合成都由电脑上的 Sakura 完成。</p>
+  </div>
+
+  <div class="card">
+    <div>
+      <label for="host">电脑地址和端口</label>
+      <input id="host" inputmode="url" autocomplete="off" spellcheck="false" placeholder="192.168.1.100:8770">
+      <div class="hint" style="margin-top:6px">填电脑的局域网 IP 和插件端口。同一个 WiFi 下直接可用；用 USB 调试时也可以填 <code>127.0.0.1:8770</code>（需先执行 adb reverse）。</div>
+    </div>
+    <div>
+      <label for="token">访问 token</label>
+      <input id="token" autocomplete="off" spellcheck="false" placeholder="在 Sakura 设置 → 手机远程端里查看">
+    </div>
+    <div class="row">
+      <button id="test" class="ghost" type="button">测试连接</button>
+      <button id="go" type="button">进入</button>
+    </div>
+    <div id="msg"></div>
+  </div>
+
+  <div>
+    <label>最近使用</label>
+    <div id="recent"></div>
+  </div>
+
+  <p class="hint">
+    地址填电脑的局域网 IP 时，手机需要和电脑在同一个 WiFi（且电脑端已放行该端口）。
+    如果走 USB 调试，先在电脑上执行 <code>adb reverse tcp:8770 tcp:8770</code>，
+    再填 <code>127.0.0.1:8770</code>。要改回设置页，用手机的返回键退出即可。
+  </p>
+
+<script>
+'use strict';
+
+const KEYS = { server: 'sakura.remote.server', recent: 'sakura.remote.recent' };
+const el = {
+  host: document.getElementById('host'),
+  token: document.getElementById('token'),
+  test: document.getElementById('test'),
+  go: document.getElementById('go'),
+  msg: document.getElementById('msg'),
+  recent: document.getElementById('recent'),
+};
+
+function say(text, kind) {
+  el.msg.textContent = text || '';
+  el.msg.className = kind || '';
+}
+
+function normalizeServer(raw) {
+  let value = String(raw || '').trim();
+  if (!value) return '';
+  value = value.replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+  if (!/:\d+$/.test(value)) value += ':8770';
+  return value;
+}
+
+function readStored() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(KEYS.server) || '{}');
+    return {
+      server: typeof saved.server === 'string' ? saved.server : '',
+      token: typeof saved.token === 'string' ? saved.token : '',
+    };
+  } catch (error) {
+    return { server: '', token: '' };
+  }
+}
+
+function recentList() {
+  try {
+    const list = JSON.parse(localStorage.getItem(KEYS.recent) || '[]');
+    return Array.isArray(list) ? list.filter((item) => typeof item === 'string') : [];
+  } catch (error) {
+    return [];
+  }
+}
+
+function remember(server) {
+  const list = [server].concat(recentList().filter((item) => item !== server)).slice(0, 4);
+  try {
+    localStorage.setItem(KEYS.recent, JSON.stringify(list));
+  } catch (error) { /* 存储不可用时忽略 */ }
+  renderRecent();
+}
+
+function renderRecent() {
+  const list = recentList();
+  el.recent.innerHTML = '';
+  if (!list.length) {
+    el.recent.innerHTML = '<span class="hint">还没有连接过。</span>';
+    return;
+  }
+  list.forEach((server) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'ghost';
+    button.textContent = server;
+    button.addEventListener('click', () => {
+      el.host.value = server;
+      say('已填入，点「进入」继续。', '');
+    });
+    el.recent.appendChild(button);
+  });
+}
+
+function targetUrl(server, token) {
+  return 'http://' + server + '/?token=' + encodeURIComponent(token);
+}
+
+/**
+ * 跳到电脑端的页面。
+ *
+ * 不能用 location.replace：Capacitor 把本地页跑在 https://localhost，
+ * 往 http:// 跳属于跨源导航，WebView 会静默拦掉（表现为「测试连接」通过但页面不动）。
+ * 优先交给原生桥接，其次才退回 location。
+ */
+function goToServer(url) {
+  const bridge = window.SakuraNative;
+  if (bridge && typeof bridge.open === 'function') {
+    try {
+      bridge.open(url);
+      return true;
+    } catch (error) {
+      // 落到下面的兜底
+    }
+  }
+  window.location.href = url;
+  return false;
+}
+
+async function probe(server, token, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs || 6000);
+  try {
+    const response = await fetch(
+      'http://' + server + '/api/status?token=' + encodeURIComponent(token),
+      { signal: controller.signal, cache: 'no-store' }
+    );
+    if (!response.ok) {
+      let detail = 'HTTP ' + response.status;
+      try {
+        const data = await response.json();
+        if (data && data.error) detail = data.error;
+      } catch (error) { /* 保持 HTTP 状态码 */ }
+      return { ok: false, message: detail };
+    }
+    const data = await response.json();
+    return { ok: true, tts: !!(data && data.tts) };
+  } catch (error) {
+    if (error && error.name === 'AbortError') return { ok: false, message: '连接超时' };
+    return { ok: false, message: '连不上：' + (error && error.message ? error.message : error) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function check(server, token) {
+  el.test.disabled = true;
+  el.go.disabled = true;
+  say('正在连接 ' + server + ' …', '');
+  const result = await probe(server, token);
+  el.test.disabled = false;
+  el.go.disabled = false;
+  if (!result.ok) {
+    say('连接失败：' + result.message, 'err');
+    return false;
+  }
+  say('连接成功' + (result.tts ? '，语音合成可用。' : '，但语音合成未启用。'), 'ok');
+  return true;
+}
+
+async function enter() {
+  const server = normalizeServer(el.host.value);
+  const token = el.token.value.trim();
+  if (!server) {
+    say('请先填电脑地址。', 'err');
+    return;
+  }
+  if (!token) {
+    say('请填访问 token。', 'err');
+    return;
+  }
+  el.host.value = server;
+  const ok = await check(server, token);
+  if (!ok) return;
+  try {
+    localStorage.setItem(KEYS.server, JSON.stringify({ server: server, token: token }));
+  } catch (error) { /* 存储不可用时忽略 */ }
+  remember(server);
+  say('正在进入…', 'ok');
+  goToServer(targetUrl(server, token));
+}
+
+el.test.addEventListener('click', () => {
+  const server = normalizeServer(el.host.value);
+  const token = el.token.value.trim();
+  if (!server || !token) {
+    say('地址和 token 都要填。', 'err');
+    return;
+  }
+  el.host.value = server;
+  check(server, token);
+});
+
+el.go.addEventListener('click', enter);
+el.token.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') enter();
+});
+
+(function boot() {
+  const stored = readStored();
+  if (stored.server) el.host.value = stored.server;
+  if (stored.token) el.token.value = stored.token;
+  renderRecent();
+
+  // 有保存过配置就直接进主界面，省一次点击；连不上再回到这里。
+  if (stored.server && stored.token) {
+    say('正在连接 ' + stored.server + ' …', '');
+    probe(stored.server, stored.token, 5000).then((result) => {
+      if (result.ok) {
+        say('正在连接 ' + stored.server + ' …', 'ok');
+        goToServer(targetUrl(stored.server, stored.token));
+      } else {
+        say('上次的地址连不上了（' + result.message + '），请检查或重新填写。', 'err');
+      }
+    });
+  }
+})();
+</script>
+</body>
+</html>

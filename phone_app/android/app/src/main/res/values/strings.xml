@@ -1,0 +1,34 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Sakura</string>
+    <string name="title_activity_main">Sakura</string>
+    <string name="package_name">com.sakura.remote</string>
+    <string name="custom_url_scheme">com.sakura.remote</string>
+    <!-- 截屏用的前台服务（Android 14 起 MediaProjection 必须跑在这种服务里） -->
+    <string name="capture_channel_name">屏幕截图</string>
+    <string name="capture_notification_title">正在截图…</string>
+
+    <!-- 桌面立绘的前台服务通知 -->
+    <string name="notification_channel_name">桌面立绘</string>
+    <string name="notification_channel_desc">保持角色显示在桌面上</string>
+    <string name="notification_title">Sakura 桌面立绘运行中</string>
+    <string name="notification_text">点按进入对话</string>
+    <string name="notification_chat">对话</string>
+    <string name="notification_stop">关闭</string>
+
+    <!-- 悬浮窗标题栏 -->
+    <string name="window_drag_hint">按住拖动</string>
+    <string name="window_chat">对话</string>
+    <string name="window_minimize">缩短</string>
+
+    <!-- 提示文案 -->
+    <string name="toast_need_config">还没读到电脑地址，请回到连接页填写后重试</string>
+    <string name="toast_need_overlay_permission">需要「显示在其他应用上层」权限才能放到桌面</string>
+    <string name="toast_overlay_permission_failed">打不开权限设置页，请手动到系统设置里授予悬浮窗权限</string>
+    <string name="toast_overlay_permission_denied">未授予悬浮窗权限，桌面立绘没有开启</string>
+    <string name="toast_overlay_started">桌面立绘已开启，可拖动和双指缩放</string>
+    <string name="toast_overlay_start_failed">桌面立绘启动失败，请检查悬浮窗权限</string>
+    <string name="toast_overlay_mode">已进入桌面立绘模式。点桌面上的角色即可回到对话</string>
+    <string name="toast_battery_already">已在电池优化白名单中</string>
+    <string name="toast_battery_failed">打不开电池优化设置，请手动添加白名单</string>
+</resources>

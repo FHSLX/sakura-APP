@@ -1,0 +1,14 @@
+{
+  "appId": "com.sakura.remote",
+  "appName": "Sakura",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": true,
+    "webContentsDebuggingEnabled": true
+  },
+  "server": {
+    "androidScheme": "https",
+    "hostname": "localhost",
+    "cleartext": true
+  }
+}

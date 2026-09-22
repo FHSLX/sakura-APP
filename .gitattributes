@@ -1,0 +1,30 @@
+# Normalize line endings so the repo behaves the same on Windows / macOS / Linux.
+#
+# Without this, a Windows checkout converts text files to CRLF and every
+# cross-platform diff shows the whole file as changed.
+* text=auto eol=lf
+
+# Windows-only scripts need CRLF to run reliably under cmd.exe / PowerShell 5.1.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary assets: never touch.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.jar binary
+*.jks binary
+*.keystore binary
+*.zip binary
+*.apk binary
+*.wav binary
+*.ttf binary
+*.woff binary
+*.woff2 binary
+
+# Keep these out of language stats in the GitHub UI.
+docs/* linguist-documentation
+*.md linguist-documentation

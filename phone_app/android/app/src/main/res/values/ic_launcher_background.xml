@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 与角色主题的浅粉底色一致，自适应图标遮罩之外的部分不突兀 -->
+    <color name="ic_launcher_background">#FFF6FA</color>
+</resources>
