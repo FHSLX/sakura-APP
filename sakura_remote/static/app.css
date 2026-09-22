@@ -517,7 +517,8 @@ body.overlay-mode #hint {
   transform: translate(-50%, -50%);
   z-index: 5;
   width: auto;
-  max-width: calc(var(--pet-content-w, 100%) - 24px);
+  /* 同样要夹到视口：--pet-content-w 按屏幕宽算，可能比实际窗口宽 */
+  max-width: min(calc(var(--pet-content-w, 100%) - 24px), calc(100% - 24px));
   white-space: nowrap;
   padding: 5px 14px;
   border-radius: 999px;
@@ -809,8 +810,18 @@ body.overlay-mode .miniBar {
   display: flex;
   justify-content: flex-end;
   flex: 0 0 auto;
+  /*
+   * 宽度必须夹到视口内。
+   *
+   * --pet-content-w 是按「屏幕宽」算的目标值（如 381px），而悬浮窗实际
+   * 可能只有 319px 宽 —— 不夹取的话这一行会撑到 381px，右对齐的按钮
+   * 被推到 x=324（视口外），完全点不到。
+   * 实测：按钮 x=324 w=57，而视口只有 319，等于「按钮消失了」。
+   * #msgNav / #composer 早就夹了，这里和 #hint 之前漏了。
+   */
   width: var(--pet-content-w, 100%);
-  max-width: var(--pet-content-w, 100%);
+  max-width: min(var(--pet-content-w, 100%), 100%);
+  box-sizing: border-box;
   margin: 0 auto;
   padding: 0 0 2px;
 }

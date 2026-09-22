@@ -130,8 +130,7 @@ jobs:
             out/SakuraRemote-release.apk
             out/plugin-sakura.remote-${{ steps.version.outputs.version }}.zip
             out/MANUAL.md
-          body: |
-            安装说明见 [README](https://github.com/${{ github.repository }}#安装)。
+          body_path: docs/Release说明.md
 
             | 文件 | 装在哪 |
             | --- | --- |

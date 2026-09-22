@@ -13,6 +13,7 @@
 
 ## 目录
 
+0. [灵感来源](#灵感来源)
 1. [它是什么](#1-它是什么)
 2. [安装前准备](#2-安装前准备)
 3. [安装电脑端插件](#3-安装电脑端插件)
@@ -64,6 +65,19 @@
 
 ---
 
+## 灵感来源
+
+Sakura 官方自带一个可选的手机网页插件
+[**`sakura_mobile`（手机聊天）**](https://github.com/Rvosy/sakura/tree/main/plugins/optional/sakura_mobile)，
+作者 **pa1n9**。它把手机浏览器接入桌面端 Sakura 的同一条聊天、历史和角色链。
+
+**本项目受它启发**，聊天提交、历史读取、图片上传这几块沿用了它验证过的做法
+（`sakura.host.mobile` 的 `start` / `begin` / `poll` / `cancel`，
+图片走 `sakura.host.artifacts` 传 descriptor），并在此基础上加了立绘、语音和桌宠。
+
+如果你只想要「用手机聊天」，直接用官方那个插件就够了。
+
+---
 ## 2. 安装前准备
 
 ### 2.1 先下载安装包
