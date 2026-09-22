@@ -95,16 +95,56 @@ AI 计算和语音合成都留在电脑 · 手机只负责显示和播放
 
 ## 环境要求
 
+### 电脑端
+
 | 项目 | 要求 |
 | :--- | :--- |
-| Sakura | 支持 Plugin API **v4** |
-| 电脑 | Windows（远程重启功能依赖 Windows 计划任务） |
-| 手机 | Android **8.0+** |
+| Sakura | 支持 Plugin API **v4**（[官方下载](https://github.com/Rvosy/sakura/releases)） |
+| 系统 | Windows 10 / 11（**远程重启**功能依赖 Windows 计划任务，仅 Windows 可用；其余功能理论上跨平台，但未验证） |
+
+### 手机端：适用的安卓版本
+
+App 的 `minSdkVersion = 24`、`targetSdkVersion = 36`，也就是：
+
+| 安卓版本 | API | 支持情况 |
+| :--- | :--- | :--- |
+| **Android 14 / 15 / 16** | 34–36 | **推荐**。本项目就是在这类系统上开发和实测的（小米 Android 14） |
+| Android 12 / 12L / 13 | 31–33 | 应该可用，**未实测**。这几版要求前台服务声明类型，项目已声明，但没在真机验证过 |
+| Android 10 / 11 | 29–30 | **有风险，未实测**。代码里给前台服务传了 `specialUse` 类型，而该类型是 Android 14 才引入的，这两版可能校验失败 |
+| Android 8.0 / 9 | 26–28 | **未实测**，理论上可用（前台服务无需声明类型） |
+| Android 7.x | 24–25 | 最低支持，**未实测**。通知渠道等新特性会自动降级 |
+
+> 一句话：**Android 10 及以上都可以试，Android 14+ 最稳。**
+> 如果你在 Android 10–13 上遇到启动就闪退，多半就是上面那个前台服务类型问题，
+> 欢迎到 [Issues](https://github.com/FHSLX/sakura-APP/issues) 反馈。
+
+### 其他要求
+
+| 项目 | 要求 |
+| :--- | :--- |
 | 网络 | 同一 WiFi，或组网工具（Tailscale / ZeroTier / 蒲公英） |
+| 手机权限 | 悬浮窗（显示在其他应用上层）、通知、电池优化白名单 —— **都要手动授予** |
 
 ---
 
 ## 安装
+
+### 先下载
+
+两部分安装包都在 **[Releases 页面](https://github.com/FHSLX/sakura-APP/releases/latest)**：
+
+| 文件 | 是什么 | 装在哪 |
+| :--- | :--- | :--- |
+| **`SakuraRemote-release.apk`** | 手机 App | 手机 |
+| **`plugin-sakura.remote-1.0.0.zip`** | Sakura 插件 | 电脑 |
+| `MANUAL.md` | 完整使用手册 | 参考 |
+
+> **如果 Releases 里还没有附件**，说明发布包还没上传。两条出路：
+>
+> 1. **自己构建** —— 见下方[自己构建安装包](#自己构建安装包)。插件是纯 Python 标准库，
+>    复制目录即可；APK 需要 Android SDK。
+> 2. **到 [Issues](https://github.com/FHSLX/sakura-APP/issues) 问一下**，或者按
+>    [Release 流程](#release-流程)自己打一个 tag 触发自动构建。
 
 ### 一、电脑端插件
 
@@ -120,16 +160,52 @@ AI 计算和语音合成都留在电脑 · 手机只负责显示和播放
 
 ### 二、手机端 App
 
-```bash
-# 用预编译的 APK（推荐）
-adb install SakuraRemote-release.apk
+把 `SakuraRemote-release.apk` 传到手机安装。
 
-# 或自己构建
+> 这是**自签名**的 release 包，安装时系统会提示「未知来源」，手动允许即可。
+>
+> 如果之前装过 debug 版，两者签名不同**不能覆盖安装**，要先卸载旧的。
+
+用 adb 装也行：
+
+```bash
+adb install SakuraRemote-release.apk
+```
+
+### 自己构建安装包
+
+Releases 里没附件时，或者你想自己改代码：
+
+```bash
+# 插件：sakura_remote/ 目录本身就是完整插件（纯 Python 标准库，零依赖）
+# 直接复制到 <Sakura>/plugins/user/sakura.remote/ 即可
+
+# App：需要 Android SDK（platform 36）和 JDK 17+
 cd phone_app
 npm install
 npx cap sync android
-build_apk.bat
+build_apk.bat            # Windows；产物在 android/app/build/outputs/apk/
 ```
+
+签名配置：把 `phone_app/android/keystore.properties.example` 复制成
+`keystore.properties` 并填自己的密钥；**没有它也能构建**，只是出来的包未签名、
+多数系统装不上。
+
+### Release 流程
+
+仓库里带了一个 GitHub Actions 工作流（`.github/workflows/release.yml`），
+**打 tag 就会自动构建并发布**，不需要本地环境：
+
+```bash
+git tag -a v1.0.0 -m "首个版本"
+git push origin v1.0.0
+```
+
+它会产出三个附件：APK、插件 zip、使用手册。
+
+> CI 构建的 APK 是**未签名**的（仓库里不能放签名密钥），部分系统会拒绝安装。
+> 想让 CI 出签名包，把密钥做成 Secrets 再在 workflow 里引用即可
+> （`KEYSTORE_BASE64` / `KEYSTORE_PASSWORD` / `KEY_ALIAS` / `KEY_PASSWORD`）。
 
 ### 三、连接
 

@@ -1,0 +1,142 @@
+name: Release
+
+# 打一个 v* 标签就自动构建并发布，不需要本地环境。
+#
+# 用法：
+#   git tag -a v1.0.0 -m "首个版本"
+#   git push origin v1.0.0
+#
+# 产物：
+#   SakuraRemote-release.apk      手机 App
+#   plugin-sakura.remote-1.0.0.zip  Sakura 插件
+#   MANUAL.md                      使用手册
+
+on:
+  push:
+    tags:
+      - 'v*'
+  # 也可以在 Actions 页面手动触发一次，用来验证构建是否正常
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Read version
+        id: version
+        run: |
+          VERSION=$(grep -E '^version:' sakura_remote/plugin.yaml | head -1 | awk '{print $2}' | tr -d '"'"'"'')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "插件版本: $VERSION"
+
+      # ---- 插件包：纯 Python 标准库，没有构建步骤，打包即可 ----
+      - name: Package plugin
+        run: |
+          mkdir -p out/plugin/sakura.remote
+          cp -r sakura_remote/. out/plugin/sakura.remote/
+          # 去掉不该进包的东西（和 tools/build_release.ps1 保持一致）
+          find out/plugin -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+          find out/plugin -name '*.pyc' -delete 2>/dev/null || true
+          cd out/plugin && zip -r "../plugin-sakura.remote-${{ steps.version.outputs.version }}.zip" sakura.remote
+
+      # ---- APK ----
+      - name: Install Capacitor dependencies
+        working-directory: phone_app
+        run: npm install
+
+      - name: Sync web assets to Android
+        working-directory: phone_app
+        run: npx cap sync android
+
+      - name: Build release APK
+        working-directory: phone_app/android
+        run: |
+          chmod +x gradlew
+          # 没有 keystore.properties 时 build.gradle 会自动跳过签名，
+          # 产出的是未签名包（只能用于验证构建是否通过）
+          ./gradlew --no-daemon assembleRelease
+
+      - name: Collect APK
+        run: |
+          APK=$(find phone_app/android/app/build/outputs/apk/release -name '*.apk' | head -1)
+          if [ -z "$APK" ]; then echo "没有找到 APK"; exit 1; fi
+          cp "$APK" out/SakuraRemote-release.apk
+          ls -lh out/
+
+      - name: Collect manual
+        run: cp docs/manual.md out/MANUAL.md
+
+      # ---- 隐私扫描：和本地发布脚本同一套思路 ----
+      # 只查“形状”，不写死任何具体值，所以不需要在这里放自己的 IP。
+      - name: Privacy scan
+        run: |
+          set -e
+          FAIL=0
+          # 文档里的通用示例地址放行
+          ALLOW='192\.168\.1\.100|192\.168\.1\.1|192\.168\.0\.1|10\.0\.0\.1|127\.0\.0\.1'
+          while IFS= read -r f; do
+            case "$f" in
+              *.png|*.jpg|*.jar|*.apk) continue ;;
+            esac
+            HITS=$(grep -nEo '\b(192\.168|10\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01]))\.[0-9]{1,3}\.[0-9]{1,3}\b' "$f" 2>/dev/null \
+                   | grep -vE "$ALLOW" || true)
+            if [ -n "$HITS" ]; then
+              echo "::error file=$f::疑似真实内网 IP"
+              echo "$f: $HITS"
+              FAIL=1
+            fi
+          done < <(find out -type f)
+          if [ "$FAIL" = "1" ]; then
+            echo "隐私扫描未通过"
+            exit 1
+          fi
+          echo "隐私扫描通过"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sakura-remote-${{ steps.version.outputs.version }}
+          path: out/*
+          if-no-files-found: error
+
+      # tag 推送时才建 Release；手动触发只上传 artifact
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            out/SakuraRemote-release.apk
+            out/plugin-sakura.remote-${{ steps.version.outputs.version }}.zip
+            out/MANUAL.md
+          body: |
+            安装说明见 [README](https://github.com/${{ github.repository }}#安装)。
+
+            | 文件 | 装在哪 |
+            | --- | --- |
+            | `SakuraRemote-release.apk` | 手机 |
+            | `plugin-sakura.remote-${{ steps.version.outputs.version }}.zip` | 电脑（Sakura 插件） |
+
+            > APK 是 CI 构建的**未签名**包，部分系统可能拒绝安装。
+            > 需要签名版请按 README 的「自己构建安装包」在本机构建。
