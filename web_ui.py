@@ -228,6 +228,17 @@ _PAGE = """<!doctype html>
         <div class="settingHint" id="petHint"></div>
       </div>
 
+      <!-- 截屏授权：单独做一个按钮，让用户可以先把系统权限授好，
+           之后真正截图时就不会被系统弹窗打断。 -->
+      <div class="configCard">
+        <div class="cardTitle">截屏</div>
+        <button id="screenPermButton" class="ghostButton" type="button">授权截屏权限</button>
+        <div class="settingHint" id="screenPermHint">
+          点一次会弹出系统的「开始录制或投放」确认框，选择「立即开始」即可。
+          授权在本次开机内有效，之后「截取屏幕」就不会再弹窗。
+        </div>
+      </div>
+
       <!-- 快捷操作（悬浮窗顶栏已移除，这些放在这里） -->
       <div class="configCard">
         <div class="cardTitle">快捷操作</div>

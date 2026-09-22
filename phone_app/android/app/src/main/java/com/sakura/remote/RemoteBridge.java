@@ -84,6 +84,9 @@ public class RemoteBridge {
         /** 请求一次手机截屏；结果通过 onScreenCapture 异步回传。 */
         void requestScreenshot();
 
+        /** 只申请截屏授权（不截取），供设置页的「授权截屏权限」按钮使用。 */
+        void requestScreenPermission();
+
         boolean hasScreenPermission();
 
         /** 把截图结果交给网页（由宿主回调）。 */
@@ -262,6 +265,12 @@ public class RemoteBridge {
     @JavascriptInterface
     public void requestScreenshot() {
         host.requestScreenshot();
+    }
+
+    /** 只申请截屏授权，不截取。设置页的「授权截屏权限」按钮用。 */
+    @JavascriptInterface
+    public void requestScreenPermission() {
+        host.requestScreenPermission();
     }
 
     @JavascriptInterface

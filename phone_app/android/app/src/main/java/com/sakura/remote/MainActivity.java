@@ -40,6 +40,10 @@ public class MainActivity extends BridgeActivity implements RemoteBridge.Host {
     private boolean pendingEnterOverlayMode;
     /** 正在等屏幕截图授权。 */
     private boolean pendingScreenshot;
+    /** 授权流程期间悬浮窗是否被临时隐藏。 */
+    private boolean overlayHiddenForPermission;
+    private final android.os.Handler handlerForPermission =
+            new android.os.Handler(android.os.Looper.getMainLooper());
     /** 本次启动是否要进聊天页（从立绘点进来）。 */
     private boolean pendingOpenChat;
     /** 已经处理过跳转，避免 onResume 反复触发。 */
@@ -381,19 +385,102 @@ public class MainActivity extends BridgeActivity implements RemoteBridge.Host {
      */
     @Override
     public void requestScreenshot() {
-        android.media.projection.MediaProjectionManager manager =
+        openScreenCaptureDialog();
+    }
+
+    /**
+     * 只申请截屏授权，不附带截取动作。
+     *
+     * 设置页那个「授权截屏权限」按钮走这里：用户可以先单独把权限授好，
+     * 之后真正截图时就不会再被系统弹窗打断。
+     * 授权结果走同一条 onActivityResult 分支（授予后会把 grant 存下来）。
+     */
+    @Override
+    public void requestScreenPermission() {
+        openScreenCaptureDialog();
+    }
+
+    /** 弹出系统的「开始录制或投放」授权框。截屏与单独授权共用。 */
+    private void openScreenCaptureDialog() {
+        final android.media.projection.MediaProjectionManager manager =
                 (android.media.projection.MediaProjectionManager)
                         getSystemService(Context.MEDIA_PROJECTION_SERVICE);
         if (manager == null) {
             deliverScreenshot("", "系统不支持屏幕截图");
             return;
         }
-        pendingScreenshot = true;
+        /*
+         * 弹出确认框之前先把悬浮窗藏起来。
+         *
+         * MIUI 会在「本应用正在显示系统悬浮窗」时把系统的授权确认框压掉 ——
+         * 实测日志里能看到 MainActivity 确实被拉起来了
+         *（amsBoostNotify ... activity:com.sakura.remote.MainActivity），
+         * 但对话框一闪就消失，前台立刻回到桌面，用户根本没机会点「立即开始」。
+         * 这也是「截屏一直拿不到权限」的原因。
+         *
+         * 所以：先藏悬浮窗 → 等一下让位 → 再请求授权。
+         * 授权结果回来后由 restoreOverlayIfHidden() 负责恢复。
+         */
+        hideOverlayForPermission();
+        /*
+         * 每一步都要给系统留出时间，不能连着一口气做完：
+         *   1) 悬浮窗先真正从 WindowManager 摘掉（异步到主线程）
+         *   2) 把 Activity 带到前台，让系统确认框有个可依附的前台窗口
+         *   3) 再请求授权
+         * 之前把 2、3 挤在同一个循环里，MIUI 会把确认框直接压掉。
+         */
+        handlerForPermission.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    android.content.Intent self = new android.content.Intent(
+                            MainActivity.this, MainActivity.class);
+                    self.setFlags(android.content.Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                            | android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                    startActivity(self);
+                } catch (Exception ignored) {
+                    // 起不来也无妨，继续请求
+                }
+                handlerForPermission.postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        pendingScreenshot = true;
+                        try {
+                            startActivityForResult(manager.createScreenCaptureIntent(),
+                                    REQUEST_SCREEN_CAPTURE);
+                        } catch (Exception error) {
+                            pendingScreenshot = false;
+                            restoreOverlayIfHidden();
+                            deliverScreenshot("", "打不开截图授权页");
+                        }
+                    }
+                }, 450);
+            }
+        }, 450);
+    }
+
+    /** 授权流程期间临时隐藏悬浮窗，避免 MIUI 把系统确认框压掉。 */
+    private void hideOverlayForPermission() {
         try {
-            startActivityForResult(manager.createScreenCaptureIntent(), REQUEST_SCREEN_CAPTURE);
-        } catch (Exception error) {
-            pendingScreenshot = false;
-            deliverScreenshot("", "打不开截图授权页");
+            if (OverlayService.isRunning()) {
+                OverlayService.setPermissionHidden(true);
+                overlayHiddenForPermission = true;
+            }
+        } catch (Exception ignored) {
+            // 悬浮窗没跑就无所谓
+        }
+    }
+
+    /** 授权流程结束后把悬浮窗恢复回来。 */
+    private void restoreOverlayIfHidden() {
+        if (!overlayHiddenForPermission) {
+            return;
+        }
+        overlayHiddenForPermission = false;
+        try {
+            OverlayService.setPermissionHidden(false);
+        } catch (Exception ignored) {
+            // 已经销毁了就算了
         }
     }
 
@@ -503,6 +590,8 @@ public class MainActivity extends BridgeActivity implements RemoteBridge.Host {
             } else {
                 deliverScreenshot("", "你取消了截图授权");
             }
+            // 授权流程走完了，把刚才让位的悬浮窗放回来
+            restoreOverlayIfHidden();
             // 悬浮窗模式下截屏授权是「借」MainActivity 走个流程，用完必须让位。
             //
             // 不收回后台的话：MainActivity 会一直停在前台盖住悬浮窗 ——

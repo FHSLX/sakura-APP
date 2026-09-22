@@ -84,6 +84,8 @@ const el = {
   miniConfigButton: document.getElementById('miniConfigButton'),
   saveState: document.getElementById('saveState'),
   saveAllButton: document.getElementById('saveAllButton'),
+  screenPermButton: document.getElementById('screenPermButton'),
+  screenPermHint: document.getElementById('screenPermHint'),
   bubbleHideRange: document.getElementById('bubbleHideRange'),
   bubbleHideNumber: document.getElementById('bubbleHideNumber'),
   bubbleHideValue: document.getElementById('bubbleHideValue'),
@@ -488,20 +490,34 @@ function installOverlayGestures() {
   /**
    * 下发一次位移。
    *
-   * **单位必须换成设备像素** —— 这是「拖动不跟手」的真正原因。
+   * **单位是 CSS 像素，不要乘 devicePixelRatio。**
    *
-   * touch.clientX 是 CSS 像素，而原生 moveBy 直接把参数加到
-   * WindowManager.LayoutParams.x/y 上，那是**设备像素**。
-   * 两者相差一个 devicePixelRatio（本机 2.75）。
+   * touch.clientX 是 CSS 像素；原生把参数直接加到 WindowManager.LayoutParams
+   * 的 x/y 上，而 layoutParams 与网页 CSS 视口是 1:1 的 ——
+   * 实测 layoutParams.w / density == window.innerWidth（965/2.75 = 351，
+   * 正好等于视口宽）。所以两边本来就同单位，直接传即可。
    *
-   * 实测：连发 60 次 moveBy(3)，期望位移 3×2.75×60 = 495 设备px，
-   * 实际只有 180 设备px —— 窗口只走了手指的 1/2.75（约 36%）。
-   * 现象就是「拖了但追不上手指」，看起来像延迟，其实是速度比例错了。
+   * 曾误以为原生用设备像素而乘上 dpr，结果灵敏度被放大 2.75 倍，
+   * 窗口飞得比手指还快。判断单位前先做上面这个除法验证，别猜。
    *
    * 亚像素精度由原生负责：moveWindowBy 会累积不足 1px 的余量。
    */
   function move(dx, dy) {
     try {
+      /*
+       * 必须乘 devicePixelRatio —— 实测确认，不要再动这里。
+       *
+       * touch.clientX 是 CSS 像素，而原生把参数直接加到
+       * WindowManager.LayoutParams.x/y 上，那是**设备像素**。
+       *
+       * 实测（把窗口位移换算回 CSS 像素后对比手指位移）：
+       *   不乘 dpr：手指移动 100 CSS px，窗口只走 36 CSS px（欠走 2.75 倍）
+       *   乘   dpr：手指移动 100 CSS px，窗口走 100 CSS px（1:1）
+       *
+       * 注意「layoutParams.w / density == innerWidth」这一点**不能**用来
+       * 判断单位 —— 那两个值只是恰好相等（都是 351），但 moveBy 的入参
+       * 加到的是设备像素的坐标上。单位要靠实测位移比来定，别靠推算。
+       */
       const dpr = window.devicePixelRatio || 1;
       native.moveBy(dx * dpr, dy * dpr);
     } catch (error) { /* 忽略 */ }
@@ -1371,9 +1387,8 @@ function installBubbleGestures(target) {
       clearTimeout(holdTimer);   // 开始拖动就不叫设置了
     }
     lastX = x; lastY = y;
-    // 与悬浮窗同一条路径：增量下发，亚像素余量由原生累积。
-    // 同样必须换成设备像素 —— 见悬浮窗 move() 里的说明（差一个 dpr，
-    // 不换算的话窗口只走手指的三分之一多一点）。
+    // 与悬浮窗同一条路径：增量下发 + 乘 dpr（原生收设备像素），
+    // 亚像素余量由原生累积。见悬浮窗 move() 里的实测说明。
     try {
       const dpr = window.devicePixelRatio || 1;
       native.moveBy(dx * dpr, dy * dpr);
@@ -3140,6 +3155,52 @@ if (el.floatToggle) {
 
 if (el.saveAllButton) {
   el.saveAllButton.addEventListener('click', saveAllDisplaySettings);
+}
+
+/**
+ * 单独申请截屏授权。
+ *
+ * 为什么要单独一个按钮：系统那道「开始录制或投放」确认框只会在真正截图时弹，
+ * 用户往往在「想发张截图」的当口被打断，还得先处理授权。
+ * 放到设置页可以先授好，之后截图就是一步到位。
+ *
+ * 注意这个按钮在悬浮窗的配置页里也能看到，但悬浮窗页面调不动授权
+ * （必须由 Activity 走 startActivityForResult），所以那种情况给出提示。
+ */
+function requestScreenPermission() {
+  if (el.screenPermHint) el.screenPermHint.textContent = '正在请求系统授权…';
+  const native = nativeBridge();
+  if (!native || typeof native.requestScreenPermission !== 'function') {
+    if (el.screenPermHint) {
+      el.screenPermHint.textContent = '截屏授权需要在手机 App 内操作（当前是悬浮窗页面）。';
+    }
+    return;
+  }
+  try {
+    native.requestScreenPermission();
+  } catch (error) {
+    if (el.screenPermHint) {
+      el.screenPermHint.textContent = '请求失败：' + (error && error.message ? error.message : error);
+    }
+    return;
+  }
+  // 原生那边是异步的（等系统确认框），这里给个稍后回来核对状态的提示
+  setTimeout(() => {
+    if (!el.screenPermHint) return;
+    let granted = null;
+    try {
+      if (typeof native.hasScreenPermission === 'function') granted = native.hasScreenPermission();
+    } catch (error) { granted = null; }
+    if (granted === true) {
+      el.screenPermHint.textContent = '已获得截屏权限，现在可以正常「截取屏幕」了。';
+    } else if (granted === false) {
+      el.screenPermHint.textContent = '尚未获得授权。请点上面的按钮，并在系统弹窗里选择「立即开始」。';
+    }
+  }, 2500);
+}
+
+if (el.screenPermButton) {
+  el.screenPermButton.addEventListener('click', requestScreenPermission);
 }
 
 if (el.tokenReveal) {

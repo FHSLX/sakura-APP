@@ -16,6 +16,7 @@ import android.os.Looper;
 import android.util.DisplayMetrics;
 import android.view.Gravity;
 import android.view.MotionEvent;
+import android.view.Choreographer;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
@@ -158,8 +159,52 @@ public class OverlayService extends Service {
     private float moveRemainX;
     private float moveRemainY;
 
+    /** 拖动位移是否已排入下一帧（避免同一帧重复排）。 */
+    private boolean moveFlushScheduled;
+    private Choreographer choreographer;
+
     /** 迷你图标（小圆头像）的直径。 */
     private int bubbleSize;
+    /**
+     * 授权流程期间是否临时隐藏悬浮窗。
+     *
+     * MIUI 会在「本应用正在显示系统悬浮窗」时压掉系统的授权确认框
+     *（实测：MainActivity 被拉起来了，但对话框一闪就消失，前台回到桌面）。
+     * 所以请求截屏授权前先把它藏起来，等结果回来再放回来。
+     */
+    private static volatile boolean permissionHidden;
+    private volatile boolean permissionHiddenApplied;
+
+    /** 由 MainActivity 在授权前后调用。 */
+    public static void setPermissionHidden(boolean hidden) {
+        OverlayService service = current;
+        permissionHidden = hidden;
+        if (service != null) {
+            service.handler.post(service::applyPermissionHidden);
+        }
+    }
+
+    private void applyPermissionHidden() {
+        if (rootView == null) {
+            return;
+        }
+        if (permissionHidden && !permissionHiddenApplied) {
+            permissionHiddenApplied = true;
+            try {
+                windowManager.removeView(rootView);
+            } catch (Exception ignored) {
+                // 可能已经移除
+            }
+        } else if (!permissionHidden && permissionHiddenApplied) {
+            permissionHiddenApplied = false;
+            try {
+                windowManager.addView(rootView, layoutParams);
+            } catch (Exception ignored) {
+                // 已经加回去了
+            }
+        }
+    }
+
     /** 是否处于迷你图标模式。 */
     private boolean bubbleMode;
     /** 缩成图标前的窗口尺寸与位置，用于恢复。 */
@@ -344,7 +389,11 @@ public class OverlayService extends Service {
         }
 
         try {
-            windowManager.addView(rootView, layoutParams);
+            if (!permissionHidden) {
+                windowManager.addView(rootView, layoutParams);
+            } else {
+                permissionHiddenApplied = true;
+            }
         } catch (Exception error) {
             rootView = null;
             petWindow = null;
@@ -606,45 +655,65 @@ public class OverlayService extends Service {
     }
 
     /**
-     * 按增量移动窗口（网页长按立绘拖动时调用）。
+     * 按增量移动窗口（网页拖动立绘时调用）。
      *
-     * 去掉原生标题栏后就靠这个做拖动。位移在原生侧累加到窗口坐标，
-     * 网页只需要报「相对上一次移动了多少」。
-     * 同样要切主线程：WindowManager 是 UI 对象。
+     * 位移在原生侧累加到窗口坐标，网页只报「相对上一次移动了多少」。
+     *
+     * 合并到 vsync：不再每次调用都 handler.post 一个任务。
+     * 原来的写法在手指快速移动时会往主线程塞进大量任务，
+     * 主线程一旦忙于渲染就开始积压，表现就是「一卡一卡地突进」而不是平滑跟随。
+     * 现在把位移攒起来，由 Choreographer 在下一次屏幕刷新回调里合成一次
+     * updateViewLayout，天然对齐刷新率。
      */
     public void moveWindowBy(final float dx, final float dy) {
-        handler.post(() -> {
+        moveRemainX += dx;
+        moveRemainY += dy;
+        scheduleMoveFlush();
+    }
+
+    /** 把攒下的位移在下一帧一次性应用。 */
+    private void scheduleMoveFlush() {
+        if (moveFlushScheduled) {
+            return;
+        }
+        moveFlushScheduled = true;
+        if (choreographer == null) {
+            choreographer = Choreographer.getInstance();
+        }
+        choreographer.postFrameCallback(moveFlushCallback);
+    }
+
+    private final Choreographer.FrameCallback moveFlushCallback = new Choreographer.FrameCallback() {
+        @Override
+        public void doFrame(long frameTimeNanos) {
+            moveFlushScheduled = false;
             if (layoutParams == null || rootView == null) {
+                moveRemainX = 0;
+                moveRemainY = 0;
                 return;
             }
             /*
              * 亚像素累积，不要每帧直接取整。
              *
              * 原来写的是 layoutParams.x += Math.round(dx)：手指慢慢移动时
-             * 每帧的 dx 常常不足 1px，Math.round 一律变成 0 直接丢掉。
-             * 一秒上百帧累积下来，窗口就明显落后于手指 —— 这正是「不跟手」。
-             *
+             * 每帧的 dx 常常不足 1px，Math.round 一律变成 0 直接丢掉，
+             * 一秒上百帧累积下来窗口就明显落后于手指。
              * 这里把小数部分攒起来，凑够 1px 再进位，位移一点都不丢。
-             * 注意 remain 必须和位置分开存：位置是整数（WindowManager 要求），
-             * 小数只能靠自己记住。
+             * 位置必须是整数（WindowManager 要求），所以小数只能自己记。
              */
-            moveRemainX += dx;
-            moveRemainY += dy;
             int stepX = (int) Math.floor(moveRemainX);
             int stepY = (int) Math.floor(moveRemainY);
-            // 负数方向也要正确进位（floor 对 -0.5 给 -1，remain 留 +0.5）
             moveRemainX -= stepX;
             moveRemainY -= stepY;
             if (stepX == 0 && stepY == 0) {
-                // 还没攒够 1px，位置不用动，但保留余量等下一帧
-                return;
+                return;   // 还没攒够 1px，余量留到下一帧
             }
             layoutParams.x += stepX;
             layoutParams.y += stepY;
             clampWindowPosition();
             updateLayout();
-        });
-    }
+        }
+    };
 
     /**
      * 把窗口直接移到绝对位置（CSS 像素）。
@@ -658,6 +727,9 @@ public class OverlayService extends Service {
      * 不做任何累加，因此拖多久都不会偏。
      *
      * 这里只把 CSS 像素换成设备像素并夹到屏幕范围内。
+     *
+     * 注意 moveWindowBy 收的是**设备像素**（网页负责乘 dpr），而这里收的是
+     * **CSS 像素**（原生自己乘 density）。两条路径单位不同，改的时候别混。
      */
     public void setWindowPositionPx(final float x, final float y) {
         final float density = currentDensity();
@@ -878,6 +950,13 @@ public class OverlayService extends Service {
 
         @Override
         public void requestScreenshot() {
+            OverlayService.this.requestScreenshot();
+        }
+
+        @Override
+        public void requestScreenPermission() {
+            // 悬浮窗页里没有「授权截屏权限」按钮（那是设置页的东西），
+            // 但接口必须实现；走同一条授权路径即可。
             OverlayService.this.requestScreenshot();
         }
 
