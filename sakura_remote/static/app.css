@@ -204,6 +204,17 @@ body.overlay-mode #stage {
      立绘就容易被挤到压住卡片。 */
   flex: 0 0 auto;
   height: var(--pet-avail-h, 300px);
+  /*
+   * 这里**不要**再加 max-height 兜底。
+   *
+   * 试过 max-height: calc(100dvh - var(--pet-composer-h))，结果成了收缩循环：
+   * 舞台被夹小 → 立绘变小 → JS 按立绘算出更矮的窗口 → 100dvh 更小 →
+   * 舞台再被夹小……实测视口从 506 一路掉到 185px。
+   * 窗口尺寸是 JS 按立绘算的，CSS 再夹一次就会和它互相追逐。
+   *
+   * 「卡片隐藏后不留空隙」由「卡片高度收为 0」实现（见 #msgNav.auto-hidden），
+   * 不需要额外的高度夹取。
+   */
   min-height: 0;
   display: flex;
   align-items: flex-end;
@@ -219,7 +230,10 @@ body.overlay-mode #msgNav {
   flex: 0 0 auto;
   margin: 0 auto;
   width: var(--pet-content-w, 100%);
-  max-width: var(--pet-content-w, 100%);
+  /* min(..., 100%)：--pet-content-w 是按 screen.width 设定的目标宽度，
+     视口还没长到那么宽时（启动瞬间）会溢出，用 100% 兜住。
+     这是宽度侧唯一的兜底，不会再造成收缩循环 —— 窗口宽度只由 JS 按 screen 申请。 */
+  max-width: min(var(--pet-content-w, 100%), 100%);
   padding: 8px 6px 8px 12px;
   border-radius: 14px;
   border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
@@ -249,19 +263,36 @@ body.overlay-mode #msgNav {
 body.overlay-mode #msgNav.hidden { display: none; }
 
 /*
- * 自动隐藏：用 opacity/transform 而不是 display:none。
+ * 自动隐藏：高度真正收为 0，把空间让出来。
  *
- * 为什么不用 display:none —— 那会让卡片高度归零，窗口尺寸跟着变，
- * 触发一次重新布局，表现为「对话框消失时整个窗口抖一下」。
- * 保留占位只是看不见，位置就稳。
+ * 之前只做 opacity:0 —— 那样卡片**仍然占着 flex 空间**（实测 72px），
+ * 于是窗口没变矮、立绘也没地方可补，对话框原来那块位置就一直空着。
+ * 所以必须让高度也收掉，立绘才能顺势往下补位。
  *
+ * 用 0fr 而不是 display:none：display:none 是瞬间消失、没法做过渡，
+ * 而且会让 measure() 读到高度 0 从而把窗口算错。0fr 可以过渡，
+ * 父容器按内容自适应高度，收起时高度平滑归零。
+ *
+ * 窗口变矮由 JS 的 measure() 负责，所以这里不需要保留占位。
  * 隐藏后 pointer-events 关掉，否则看不见的卡片还会挡住底下的点击。
  */
 body.overlay-mode #msgNav.auto-hidden {
   opacity: 0;
   transform: translateY(6px);
   pointer-events: none;
-  transition: opacity 260ms ease, transform 260ms ease;
+  /* 让卡片参与「高度可以收缩」的过渡 */
+  transition: opacity 220ms ease, transform 220ms ease,
+              height 260ms ease, min-height 260ms ease,
+              margin 260ms ease, padding 260ms ease,
+              border-width 260ms ease;
+  height: 0 !important;
+  min-height: 0 !important;
+  max-height: 0 !important;
+  padding-top: 0;
+  padding-bottom: 0;
+  border-top-width: 0;
+  border-bottom-width: 0;
+  box-shadow: none;
 }
 
 body.overlay-mode #msgNav.auto-hidden-now {
@@ -374,7 +405,7 @@ body.overlay-mode #composer {
   flex: 0 0 auto;
   margin: 0 auto;
   width: var(--pet-content-w, 100%);
-  max-width: var(--pet-content-w, 100%);
+  max-width: min(var(--pet-content-w, 100%), 100%);
   padding: 6px 8px 6px;
   /* 这里原来是一层底色渐变，在透明窗口里会显成白块 */
   background: transparent;
@@ -433,23 +464,30 @@ body.overlay-mode #status {
   text-shadow: 0 1px 3px rgba(255, 255, 255, 0.9);
 }
 
-/* 语音解锁提示：做成浮在对话框上方的窄条，不占布局高度。
+/* 语音解锁提示：浮在对话框上方的窄条，不占布局高度。
  * 占高度的话它会改变 chromeH，而 chromeH 又参与窗口高度计算 ——
- * 实测这会造成 measure() 每次算出不同高度（694/652/592/610…）来回抖。 */
+ * 实测这会造成 measure() 每次算出不同高度（694/652/592/610…）来回抖。
+ *
+ * 位置用 top 而不是 bottom：bottom 要跟着 nav 高度算，对话框一隐藏提示条
+ * 就会跳一大段；用 top + 整窗居中更稳，也正好落在立绘与对话框之间。
+ * 提示条现在只在首次出现（见 JS 的 showHintOnce），所以不会长期压着立绘。 */
 body.overlay-mode #hint {
   position: absolute;
   left: 50%;
-  transform: translateX(-50%);
-  bottom: calc(var(--pet-composer-h, 96px) + var(--pet-nav-h, 240px) + 8px);
+  top: 50%;
+  transform: translate(-50%, -50%);
   z-index: 5;
-  width: var(--pet-content-w, 100%);
-  max-width: var(--pet-content-w, 100%);
-  padding: 4px 10px;
-  border-radius: 10px;
+  width: auto;
+  max-width: calc(var(--pet-content-w, 100%) - 24px);
+  white-space: nowrap;
+  padding: 5px 14px;
+  border-radius: 999px;
   font-size: 12px;
   text-align: center;
   color: var(--secondary-text);
-  background: color-mix(in srgb, var(--input-bg) 78%, transparent);
+  background: color-mix(in srgb, var(--input-bg) 86%, transparent);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 2px 10px rgba(120, 60, 95, 0.16);
   text-shadow: none;
   pointer-events: none;
 }
@@ -666,10 +704,15 @@ body.overlay-mode #portrait {
 
 /* 立绘位置：--pet-pan-y 由 JS 按立绘高度换算成像素。
  * 用像素而不是百分比：立绘高度是 flex 分配的，百分比基准不稳定，
- * 实测「调了没反应」。这里再叠上呼吸动画的 --pet-lift。 */
+ * 实测「调了没反应」。这里再叠上呼吸动画的 --pet-lift。
+ *
+ * 对话框隐藏后立绘会自然往下补位 —— 不靠这里的 transform，
+ * 而是卡片高度收为 0（见下面 #msgNav.auto-hidden），stage 自动占满空出来的空间。 */
 body.overlay-mode #portrait {
   transform: translate(var(--pet-pan-x, 0px), var(--pet-pan-y, 0px))
              translateY(var(--pet-lift, 0px));
+  /* 补位时平滑过渡，别瞬间跳 */
+  transition: transform 280ms ease;
 }
 
 /* 关掉上下浮动。

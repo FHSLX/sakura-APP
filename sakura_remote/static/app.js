@@ -153,6 +153,8 @@ const state = {
   pendingMedia: null,
   /** 本次会话截了几张图 */
   screenshotCount: 0,
+  /** 对话框卡片上次实际渲染出来的高度（隐藏时用来给立绘补位） */
+  lastNavHeight: 0,
 };
 
 const PORTRAIT_SCALE_KEY = 'sakura.remote.portraitScale';
@@ -906,21 +908,22 @@ function installContentWidthSync() {
     }
 
     const pad = 6;
-    // 这里要区分两个宽度，混用会出两种相反的 bug：
-    //
-    //  * screen.width（逻辑宽，如 393）= **目标**宽度，窗口要长到这么宽；
-    //  * window.innerWidth = **当前实际**视口宽度，可能还没长到目标值。
-    //
-    // 踩过的两个坑正好是这对矛盾的两面：
-    //   1) 卡片宽度用 screenW，但视口只有 334 → 卡片 381 溢出 47px，
-    //      对话框的 ▲▼ 按钮被挤出屏幕截断；
-    //   2) 反过来把目标也改成 innerWidth → 窗口越量越窄（实测缩到 160px），
-    //      因为视口本身就受窗口尺寸影响，形成收缩循环。
-    //
-    // 所以：内容宽度夹到「当前视口」保证不溢出；窗口尺寸仍按 screen 目标值申请。
+    /*
+     * 宽度一律以 screen.width（逻辑宽，如 393）为目标。
+     *
+     * 踩过的三个坑，都在这两个宽度上：
+     *   1) 卡片宽度用 screenW 而视口只有 334 → 卡片 381 溢出 47px，
+     *      对话框的 ▲▼ 按钮被挤出屏幕截断；
+     *   2) 反过来把目标也改成 innerWidth → 窗口越量越窄（实测缩到 160px），
+     *      因为视口本身受窗口尺寸影响，形成收缩循环；
+     *   3) 目标用 innerWidth 时，启动那一刻窗口还没长到目标值（实测只有 319
+     *      而屏幕是 393），于是窗口一直卡在 81% 宽度、右侧留白。
+     *
+     * 所以：窗口尺寸只按 screen 申请；卡片宽度在 CSS 里用 max-width 夹住，
+     * 不依赖 JS 读视口。这样既不会溢出，也不会因视口滞后而缩水。
+     */
     const screenW = Math.max(160, window.screen.width || window.innerWidth || 334);
     const screenH = window.screen.height || window.innerHeight || 640;
-    const viewW = Math.max(160, window.innerWidth || screenW);
     const targetContentW = Math.max(120, screenW - pad * 2);
 
     // ---- 对话框高度：按文字内容自适应 ----
@@ -930,11 +933,22 @@ function installContentWidthSync() {
     // 因为 --pet-nav-h 是给卡片的固定高度，它会把卡片撑高，
     // 于是 scrollHeight 返回的是「被撑高后」的值，永远等于上限
     //（实测无论文字长短都是 304）。清零后 scrollHeight 才是内容真实高度。
-    const contentW = Math.max(120, Math.min(targetContentW, viewW - pad * 2));
+    // 宽度按目标值设定；万一视口还没长到那么宽，由 CSS 的
+    // max-width: min(..., 100%) 兜住，不会溢出（见 app.css 的 #msgNav / #composer）。
+    const contentW = targetContentW;
     document.documentElement.style.setProperty('--pet-content-w', contentW + 'px');
     const navCap = Math.max(110, Math.round(screenH * 0.4));
+    // 卡片「真实渲染高度」缓存。
+    //
+    // 为什么需要单独一个值：navH 在算不出来时会回退成 navCap（屏幕高的 40%），
+    // 而卡片实际可能只有一半高。用 navH 当补位量会让立绘下移过头
+    //（实测 navH=358 而卡片只有约 200），把卡片那块空位补穿。
+    // 所以每次卡片可见时都记下它的 offsetHeight，补位用这个。
     let navH = 0;
-    if (el.msgNav && !el.msgNav.classList.contains('hidden') && el.msgText) {
+    const navVisible = !!(el.msgNav
+      && !el.msgNav.classList.contains('hidden')
+      && !el.msgNav.classList.contains('auto-hidden'));
+    if (navVisible && el.msgText) {
       el.msgNav.style.height = '0px';
       const natural = el.msgText.scrollHeight || 0;
       el.msgNav.style.removeProperty('height');
@@ -942,9 +956,12 @@ function installContentWidthSync() {
       const box = Math.max(0, (el.msgNav.offsetHeight || 0)
         - (el.msgText.offsetHeight || 0));
       navH = Math.max(0, Math.min(navCap, Math.ceil((natural + box + 8) / 8) * 8));
+      // 记下这次实际渲染出来的高度，供隐藏时补位使用
+      const rendered = Math.round(el.msgNav.offsetHeight || 0);
+      if (rendered > 0) state.lastNavHeight = rendered;
     }
     if (!navH) {
-      navH = el.msgNav && !el.msgNav.classList.contains('hidden') ? navCap : 0;
+      navH = navVisible ? navCap : 0;
     }
     // 输入栏高度：用 offsetHeight，不用 getBoundingClientRect().height。
     //
@@ -954,18 +971,38 @@ function installContentWidthSync() {
     // 结果卡片多占 42px、正好压住输入栏。
     const composerH = el.composer ? Math.round(el.composer.offsetHeight || 0) : 0;
     const composerBudget = Math.max(70, composerH + 8);
+    // 卡片高度变成 0 之后（auto-hidden），navH 必须是 0，
+    // 这样窗口也会跟着变矮，立绘顺势补位。
+    // 注意别在这里再叠一个「补位偏移」—— 卡片实时收起已经让 stage 自动占满
+    // 释放出来的空间，再手动位移就会补过头、立绘压住输入栏（实测 -42px 重叠）。
     document.documentElement.style.setProperty('--pet-nav-h', navH + 'px');
     document.documentElement.style.setProperty('--pet-composer-h', composerBudget + 'px');
 
-    // ---- 立绘尺寸：由缩放倍率决定，并夹到屏幕内 ----
-    // 原因：改窗口后 WebView 不更新布局视口，读它会把陈旧值算进布局，
-    // 轻则算错、重则形成「请求更大窗口→视口变大→再请求」的自我放大循环
-    //（实测每 400ms 涨 12px，一路涨到屏幕高才停）。
+    // ---- 立绘尺寸：由缩放倍率决定，并夹到可用空间内 ----
+    // 注意用「当前视口高度」而不是 screen.height 来算上限。
+    //
+    // 踩过的坑：原来只有 screenH（895），于是立绘一路取到上限 321px，
+    // 而实际视口只有 482px。对话框一隐藏、窗口变矮到 410 之后空间根本不够，
+    // 立绘底部就压住输入栏（实测重叠 20px）。
+    // 视口才是真正画得下的高度，screen 只是设备逻辑高，两者不一定相等。
     const scale = state.portraitScale || 1;
     const chrome = navH + composerBudget + pad * 2;
-    // 立绘按「目标宽度」适配（窗口会长到这么宽）；卡片则夹在当前视口内。
+    /*
+     * 可用高度取 screen.height 与当前视口的**较大值**。
+     *
+     * 为什么取大值而不是小值（取小值试过，是错的）：
+     *   - 只按视口算会形成收缩循环：视口变小 → 立绘变小 → 窗口更矮 →
+     *     视口再变小……实测一路掉到 185px；
+     *   - 用 max 则立绘尺寸只由屏幕高决定，和当前窗口尺寸无关，
+     *     不会互相追逐。
+     * 窗口变矮时立绘也不缩，但那是必要的：变矮的原因是卡片收起，
+     * 那部分空间正好由立绘补上，不会溢出。
+     */
+    const screenH2 = window.screen.height || screenH;
+    const availH = Math.max(220, Math.max(screenH, screenH2));
+    // 立绘按「目标宽度」适配（窗口会长到这么宽）；高度则夹在可用空间内。
     const maxPortraitW = targetContentW;
-    const maxPortraitH = Math.max(100, screenH - chrome - pad * 2);
+    const maxPortraitH = Math.max(100, availH - chrome - pad * 2);
     const base = Math.min(maxPortraitW / naturalW, maxPortraitH / naturalH);
     const portraitW = Math.max(40, Math.round(naturalW * base * scale));
     const portraitH = Math.max(40, Math.round(naturalH * base * scale));
@@ -2133,6 +2170,44 @@ function stepMessage(delta) {
   scheduleBubbleAutoHide();
 }
 
+/* ---------- 语音解锁提示：只出现一次 ----------
+ *
+ * 这条提示的用途是告诉用户「要轻触一下才能出声」（浏览器强制要求用户交互）。
+ * 但它一直挂在立绘上很碍眼，所以按「只教一次」处理：
+ * 首次展示并成功解锁后就永久记住，之后不再出现。
+ *
+ * 注意解锁状态本身不能持久化 —— 每次会话都要重新触摸一次（浏览器策略），
+ * 所以分离成两个标记：SHOWN（提示教过没有）和 audioUnlocked（本次会话是否已解锁）。
+ */
+const HINT_SHOWN_KEY = 'sakura.remote.hintShown';
+
+function hintAlreadyShown() {
+  try {
+    return localStorage.getItem(HINT_SHOWN_KEY) === '1';
+  } catch (error) {
+    return false;
+  }
+}
+
+function markHintShown() {
+  try {
+    localStorage.setItem(HINT_SHOWN_KEY, '1');
+  } catch (error) { /* 存不了就退化成每次都显示 */ }
+}
+
+/** 需要提示时调用：已经教过就不再显示。 */
+function showHintOnce() {
+  if (!el.hint) return;
+  if (hintAlreadyShown()) return;
+  el.hint.classList.add('show');
+}
+
+function hideHint() {
+  if (!el.hint) return;
+  el.hint.classList.remove('show');
+  markHintShown();
+}
+
 /* ---------- 对话框自动隐藏 ----------
  *
  * 两种情况收起对话框：
@@ -2169,12 +2244,38 @@ function hideBubble(immediate) {
     // 立刻收起：把过渡也去掉，避免还要等动画
     el.msgNav.classList.add('auto-hidden-now');
   }
+  // 立刻让立绘补位。等 measure() 的 400ms 定时器会让这段空隙被看见。
+  refreshBubbleLayout();
 }
 
 function showBubble() {
   if (!el.msgNav) return;
+  const wasHidden = el.msgNav.classList.contains('auto-hidden');
   el.msgNav.classList.remove('auto-hidden');
   el.msgNav.classList.remove('auto-hidden-now');
+  // 弹出气泡时立绘要让位，同样立刻生效
+  if (wasHidden) refreshBubbleLayout();
+}
+
+/**
+ * 对话框显隐后刷新布局。
+ *
+ * 卡片高度收为 0 是 260ms 的过渡，窗口尺寸要等它走完才算得准 ——
+ * 过渡中途量到的是中间值，窗口会算小或算大。
+ * 所以先用 rAF 让类名生效（补位立刻可见），再等过渡结束补一次精确重算。
+ */
+function refreshBubbleLayout() {
+  const apply = () => {
+    if (typeof relayoutOverlay === 'function') relayoutOverlay();
+  };
+  if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(apply);
+  } else {
+    setTimeout(apply, 16);
+  }
+  // 过渡结束后再量一次，拿到收敛后的高度
+  clearTimeout(refreshBubbleLayout._settle);
+  refreshBubbleLayout._settle = setTimeout(apply, 320);
 }
 
 /** 有新内容时调用：先把对话框显示出来，再重新计时。 */
@@ -2272,11 +2373,11 @@ function unlockAudio() {
   if (attempt && typeof attempt.then === 'function') {
     attempt.then(() => {
       state.audioUnlocked = true;
-      el.hint.classList.remove('show');
+      hideHint();
       player.pause();
       drainQueue();
     }).catch(() => {
-      el.hint.classList.add('show');
+      showHintOnce();
     });
   }
 }
@@ -2316,7 +2417,7 @@ function drainQueue() {
 async function playSegment(segment) {
   if (!state.audioUnlocked) {
     state.pending.unshift(segment);
-    el.hint.classList.add('show');
+    showHintOnce();
     return;
   }
   const player = ensureAudio();
@@ -2356,7 +2457,7 @@ async function playSegment(segment) {
       await player.play();
     } catch (error) {
       state.audioUnlocked = false;
-      el.hint.classList.add('show');
+      showHintOnce();
       state.pending.unshift(segment);
       state.busy = false;
       return;
@@ -2545,7 +2646,7 @@ async function send(text, file) {
     }
     if (!segments.length) systemNote('（这条回复没有可显示内容）');
     setStatus('');
-    if (state.voiceEnabled && !state.audioUnlocked) el.hint.classList.add('show');
+    if (state.voiceEnabled && !state.audioUnlocked) showHintOnce();
   } catch (error) {
     const message = error && error.message ? error.message : String(error);
     systemNote(message);
