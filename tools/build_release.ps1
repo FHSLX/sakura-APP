@@ -1,4 +1,4 @@
-# Build a publishable release bundle, excluding private runtime data.
+﻿# Build a publishable release bundle, excluding private runtime data.
 #
 # Why a script: a release bundle must not carry this machine's runtime data
 # (token, logs, caches), and picking files by hand is easy to get wrong.
