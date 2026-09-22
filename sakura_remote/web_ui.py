@@ -308,6 +308,7 @@ _PAGE = """<!doctype html>
   </div>
   <div id="msgButtons">
     <button id="msgPrev" type="button" aria-label="上一条">&#9650;</button>
+    <span id="msgCounter" aria-label="第几条">1 / 1</span>
     <button id="msgNext" type="button" aria-label="下一条">&#9660;</button>
   </div>
 </div>

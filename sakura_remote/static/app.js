@@ -68,6 +68,7 @@ const el = {
   msgNav: document.getElementById('msgNav'),
   msgPrev: document.getElementById('msgPrev'),
   msgNext: document.getElementById('msgNext'),
+  msgCounter: document.getElementById('msgCounter'),
   msgText: document.getElementById('msgText'),
   msgName: document.getElementById('msgName'),
   msgBody: document.getElementById('msgBody'),
@@ -423,7 +424,7 @@ function setOverlayKeyboard(focused) {
  * 规则（长按是同一个起手式）：
  *   - 按住后移动超过阈值  → 拖动窗口（发给原生 moveBy）
  *   - 按住不动满 5 秒     → 打开配置页
- *   - 只是轻点            → 不做事（语音解锁由全局监听负责）
+ *   - 只是轻点            → 显示/隐藏对话框
  *
  * 为什么拖动放在网页侧：去掉原生标题栏后窗口就没有自带拖动区了，
  * 而网页能精确判断用户按住的是立绘还是气泡/按钮，误触更少。
@@ -438,6 +439,7 @@ function installOverlayGestures() {
 
   let holding = false;
   let dragging = false;
+  let longPressed = false;     // 长按已触发开设置，抬手时就不再算轻点
   let lastX = 0;
   let lastY = 0;
   let holdTimer = 0;
@@ -460,6 +462,7 @@ function installOverlayGestures() {
     const touch = event.touches[0];
     holding = true;
     dragging = false;
+    longPressed = false;   // 每次按下都重置
     startX = touch.clientX;
     startY = touch.clientY;
     lastX = startX;
@@ -469,6 +472,7 @@ function installOverlayGestures() {
       if (!dragging) {
         // 静置满 5 秒：开设置
         holding = false;
+        longPressed = true;
         openConfig(true);
       }
     }, HOLD_MS);
@@ -522,20 +526,31 @@ function installOverlayGestures() {
     event.preventDefault();
   }, { passive: false });
 
-  const end = () => {
+  const end = (cancelled) => {
+    // 判断这一次是「轻点」还是「长按/拖动」：
+    //   - 没拖动过（dragging=false）
+    //   - 位移小于阈值
+    //   - 不是长按触发的开设置（holdTimer 还在）
+    // 满足就是轻点，用来显示/隐藏对话框。
+    //
+    // 之前这里没有任何轻点处理，所以点立绘什么都不发生 ——
+    // 用户想「点一下学姐看/收气泡」是做不到的。
+    const isTap = !cancelled && !dragging && holdTimer && !longPressed;
     holding = false;
     dragging = false;
     clearHold();
     // 松手时把还没发出的位移补上，否则最后一点距离会丢
     flushMove();
+    if (isTap) toggleBubbleByTap();
   };
-  target.addEventListener('touchend', end, { passive: true });
-  target.addEventListener('touchcancel', end, { passive: true });
+  target.addEventListener('touchend', () => end(false), { passive: true });
+  target.addEventListener('touchcancel', () => end(true), { passive: true });
 
   // 鼠标也支持一份，方便在电脑浏览器里调试
   target.addEventListener('mousedown', (event) => {
     holding = true;
     dragging = false;
+    longPressed = false;
     startX = event.clientX;
     startY = event.clientY;
     lastX = startX;
@@ -544,6 +559,7 @@ function installOverlayGestures() {
     holdTimer = setTimeout(() => {
       if (!dragging) {
         holding = false;
+        longPressed = true;
         openConfig(true);
       }
     }, HOLD_MS);
@@ -561,7 +577,26 @@ function installOverlayGestures() {
     lastY = event.clientY;
     move(dx, dy);
   });
-  window.addEventListener('mouseup', end);
+  window.addEventListener('mouseup', () => end(false));
+}
+
+/**
+ * 轻点立绘：显示 / 隐藏对话框。
+ *
+ * 用户想「点一下学姐看看她说了什么，再点一下收起来」，所以做成切换。
+ * 显示时不重新计时自动隐藏 —— 那是用户主动要求的，等 12 秒就自动收掉会很突兀。
+ */
+function toggleBubbleByTap() {
+  if (!el.msgNav) return;
+  if (el.msgNav.classList.contains('hidden')) return;   // 没内容，别切
+  const hidden = el.msgNav.classList.contains('auto-hidden')
+    || el.msgNav.classList.contains('auto-hidden-now');
+  if (hidden) {
+    showBubble();
+    clearTimeout(bubbleHideTimer);   // 用户主动显示，别马上又被自动隐藏收走
+  } else {
+    hideBubble(true);
+  }
 }
 
 /* ---------- 已选内容提示条 ----------
@@ -2201,6 +2236,7 @@ function applyMessageNav(options = {}) {
     if (el.msgNav) el.msgNav.classList.toggle('hidden', total === 0);
     if (el.msgPrev) el.msgPrev.disabled = state.messageIndex <= 0;
     if (el.msgNext) el.msgNext.disabled = state.messageIndex >= total - 1;
+    updateMsgCounter(total);
     return;
   }
 
@@ -2212,6 +2248,7 @@ function applyMessageNav(options = {}) {
   }
   if (el.msgPrev) el.msgPrev.disabled = state.messageIndex <= 0;
   if (el.msgNext) el.msgNext.disabled = state.messageIndex >= total - 1;
+  updateMsgCounter(total);
 
   // 把当前这条渲染进对话框卡片（参考电脑端：文字 + 右侧竖排切换按钮）。
   // 内容取自 row.dataset —— 气泡行在悬浮窗里是 display:none，
@@ -2257,6 +2294,21 @@ function applyMessageNav(options = {}) {
   if (!options.skipRelayout && typeof relayoutOverlay === 'function') {
     relayoutOverlay();
   }
+}
+
+/**
+ * 更新「第几条 / 共几条」。
+ *
+ * 没有它的话，用户看到两个箭头不知道有没东西可翻、翻到哪了，
+ * 很容易以为按钮没生效。总数 1 时显示成「1 / 1」，一眼看出没有更多。
+ */
+function updateMsgCounter(total) {
+  if (!el.msgCounter) return;
+  if (!total) {
+    el.msgCounter.textContent = '';
+    return;
+  }
+  el.msgCounter.textContent = (state.messageIndex + 1) + ' / ' + total;
 }
 
 function stepMessage(delta) {
@@ -2340,6 +2392,24 @@ function hideHint() {
 
 const BUBBLE_HIDE_DELAY_KEY = 'sakura.remote.bubbleHideSec';
 const BUBBLE_HIDE_DEFAULT = 12;
+
+/*
+ * 旧版本把「自动隐藏」的默认值写成过 30 秒（当时为方便测试调的），
+ * 而且配置页的滑块范围是 0-60，用户很难判断 30 是不是自己设的。
+ * 这里做一次性迁移：只把「恰好是 30」的旧值改回 12，
+ * 之后用户在配置页主动设的 30 会被保留（migration 只跑一次）。
+ */
+const BUBBLE_HIDE_MIGRATION_KEY = 'sakura.remote.bubbleHideMigrated';
+function migrateBubbleHideDelay() {
+  try {
+    if (localStorage.getItem(BUBBLE_HIDE_MIGRATION_KEY) === '1') return;
+    if (localStorage.getItem(BUBBLE_HIDE_DELAY_KEY) === '30') {
+      localStorage.setItem(BUBBLE_HIDE_DELAY_KEY, String(BUBBLE_HIDE_DEFAULT));
+    }
+    localStorage.setItem(BUBBLE_HIDE_MIGRATION_KEY, '1');
+  } catch (error) { /* 存不了也无所谓 */ }
+}
+migrateBubbleHideDelay();
 
 let bubbleHideTimer = 0;
 

@@ -352,24 +352,55 @@ body.overlay-mode #msgButtons {
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
+  align-items: center;
   justify-content: center;
   gap: 4px;
 }
 
+/*
+ * 条数指示（如 3 / 16）。
+ *
+ * 加它的原因：用户看到两个箭头但不知道有没东西可翻、翻到第几条了，
+ * 很容易以为「按钮没生效」。有个数字就一目了然。
+ * 放在两个按钮中间，不额外占宽度。
+ */
+body.overlay-mode #msgCounter {
+  flex: 0 0 auto;
+  min-width: 34px;
+  text-align: center;
+  font-size: 10px;
+  line-height: 1.2;
+  color: var(--secondary-text);
+  opacity: 0.85;
+  user-select: none;
+  pointer-events: none;
+}
+
 body.overlay-mode #msgButtons button {
-  width: 30px;
-  height: 26px;
+  /*
+   * 尺寸和对比度都提上来了。
+   *
+   * 原来 30×26、背景 60% 透明、字号 11px —— 在透明窗口上几乎看不出是按钮，
+   * 用户会以为「切换按钮没了」（实测截图里只剩两条淡到看不清的边）。
+   * 现在 34×32、背景 92% 不透明、加阴影，明确是个可点的圆角按钮。
+   */
+  width: 34px;
+  height: 32px;
   padding: 0;
-  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--input-bg) 60%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--input-bg) 92%, transparent);
+  box-shadow: 0 2px 8px rgba(120, 60, 95, 0.18);
   color: var(--primary);
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1;
   cursor: pointer;
 }
 
-body.overlay-mode #msgButtons button:disabled { opacity: 0.28; }
+body.overlay-mode #msgButtons button:disabled {
+  opacity: 0.38;
+  box-shadow: none;
+}
 
 body.overlay-mode #msgButtons button:active { transform: scale(0.94); }
 
