@@ -486,20 +486,24 @@ function installOverlayGestures() {
   }
 
   /**
-   * 下发一次位移（CSS 像素）。
+   * 下发一次位移。
    *
-   * 用增量而不是绝对定位：绝对定位需要把「手指屏坐标」和「窗口位置」放进
-   * 同一个坐标系，而 WebView 里 screenX/Y 到底按设备像素还是 CSS 像素算，
-   * 没法在没有真机手指输入的情况下证实 —— 赌错一个系数就整条拖动失效。
-   * 增量方式不依赖这个假设，更稳。
+   * **单位必须换成设备像素** —— 这是「拖动不跟手」的真正原因。
    *
-   * 亚像素精度由原生负责：moveWindowBy 会把不足 1px 的小数余量攒起来，
-   * 凑够 1px 再进位（原来的实现是每帧 Math.round，小数直接丢掉，
-   * 这才是「不跟手」的真正来源）。
+   * touch.clientX 是 CSS 像素，而原生 moveBy 直接把参数加到
+   * WindowManager.LayoutParams.x/y 上，那是**设备像素**。
+   * 两者相差一个 devicePixelRatio（本机 2.75）。
+   *
+   * 实测：连发 60 次 moveBy(3)，期望位移 3×2.75×60 = 495 设备px，
+   * 实际只有 180 设备px —— 窗口只走了手指的 1/2.75（约 36%）。
+   * 现象就是「拖了但追不上手指」，看起来像延迟，其实是速度比例错了。
+   *
+   * 亚像素精度由原生负责：moveWindowBy 会累积不足 1px 的余量。
    */
   function move(dx, dy) {
     try {
-      native.moveBy(dx, dy);
+      const dpr = window.devicePixelRatio || 1;
+      native.moveBy(dx * dpr, dy * dpr);
     } catch (error) { /* 忽略 */ }
   }
 
@@ -522,7 +526,21 @@ function installOverlayGestures() {
         openConfig(true);
       }
     }, HOLD_MS);
-  }, { passive: true });
+    /*
+     * 阻止 WebView 的默认触摸行为。
+     *
+     * 不阻止的话，手指按在立绘（或它旁边的透明区）上，WebView 会启动
+     * 系统级的点击/长按反馈 —— 长按还会浮出一张半透明的「幽灵图」盖在原图上。
+     * 在透明悬浮窗里看就是「立绘变成半透明了」。
+     *
+     * 它是原生画的，CSS 的 -webkit-tap-highlight-color / touch-callout
+     * 都管不到（实测加了也没用），只有 preventDefault 能拦住。
+     *
+     * 这里必须用 passive: false —— passive 监听器里的 preventDefault
+     * 是无效的（浏览器会忽略并警告），那正是上一版没生效的原因。
+     */
+    event.preventDefault();
+  }, { passive: false });
 
   target.addEventListener('touchmove', (event) => {
     if (!holding || event.touches.length !== 1) return;
@@ -562,8 +580,8 @@ function installOverlayGestures() {
     // 位移已经逐次直接下发了，这里不需要再补发
     if (isTap) onPortraitTap(startX, startY, target);
   };
-  target.addEventListener('touchend', () => end(false), { passive: true });
-  target.addEventListener('touchcancel', () => end(true), { passive: true });
+  target.addEventListener('touchend', (event) => { end(false); event.preventDefault(); }, { passive: false });
+  target.addEventListener('touchcancel', (event) => { end(true); event.preventDefault(); }, { passive: false });
 
   // 鼠标也支持一份，方便在电脑浏览器里调试
   target.addEventListener('mousedown', (event) => {
@@ -595,7 +613,10 @@ function installOverlayGestures() {
     lastX = event.clientX;
     lastY = event.clientY;
     // 鼠标路径保留增量方式（只在电脑浏览器里调试用，没有原生悬浮窗）
-    try { native.moveBy(dx, dy); } catch (error) { /* 忽略 */ }
+    try {
+      const dpr = window.devicePixelRatio || 1;
+      native.moveBy(dx * dpr, dy * dpr);
+    } catch (error) { /* 忽略 */ }
   });
   window.addEventListener('mouseup', () => end(false));
 }
@@ -1350,8 +1371,13 @@ function installBubbleGestures(target) {
       clearTimeout(holdTimer);   // 开始拖动就不叫设置了
     }
     lastX = x; lastY = y;
-    // 与悬浮窗同一条路径：增量下发，亚像素余量由原生累积
-    try { native.moveBy(dx, dy); } catch (error) { /* 忽略 */ }
+    // 与悬浮窗同一条路径：增量下发，亚像素余量由原生累积。
+    // 同样必须换成设备像素 —— 见悬浮窗 move() 里的说明（差一个 dpr，
+    // 不换算的话窗口只走手指的三分之一多一点）。
+    try {
+      const dpr = window.devicePixelRatio || 1;
+      native.moveBy(dx * dpr, dy * dpr);
+    } catch (error) { /* 忽略 */ }
   }
 
   function finish() {
@@ -1380,8 +1406,8 @@ function installBubbleGestures(target) {
     event.preventDefault();
   }, { passive: false });
 
-  target.addEventListener('touchend', finish, { passive: true });
-  target.addEventListener('touchcancel', finish, { passive: true });
+  target.addEventListener('touchend', (event) => { finish(); event.preventDefault(); }, { passive: false });
+  target.addEventListener('touchcancel', (event) => { finish(); event.preventDefault(); }, { passive: false });
 
   // 鼠标版本，方便在电脑浏览器里调试
   target.addEventListener('mousedown', (event) => begin(event.clientX, event.clientY));

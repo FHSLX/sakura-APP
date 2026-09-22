@@ -90,6 +90,20 @@ html, body {
   transition: opacity 260ms ease;
   animation: breathe 4.2s ease-in-out infinite;
   will-change: transform, opacity;
+  /*
+   * 关掉 WebView 的默认触摸反馈。
+   *
+   * 不加这几行时，手指按在立绘（或它旁边的透明区）上，WebView 会画出
+   * 系统级的点击/长按高亮 —— 在透明悬浮窗上看就是「立绘变半透明了」。
+   * 它是原生画的，CSS 里找不到任何对应规则，很容易误判成透明度 bug。
+   * 交互反馈我们自己控制（body.dragging 关滤镜、:active 缩放），不需要这层。
+   */
+  -webkit-tap-highlight-color: transparent;
+  /* -webkit-touch-callout 是 iOS 属性，Android WebView 不支持（实测取值为空）。
+     真正的长按「幽灵图」靠 JS 的 preventDefault 拦，见 installOverlayGestures。 */
+  -webkit-touch-callout: none;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
 #portrait.switching { opacity: 0; }
@@ -128,6 +142,19 @@ body.overlay-mode {
 
 body.overlay-mode #stage,
 body.overlay-mode #backdrop,
+/* 悬浮窗里彻底关掉 WebView 的系统触摸反馈（见 #portrait 里的说明）。
+   放在这里是为了覆盖到舞台、立绘容器等所有会接到触摸的元素。 */
+/* sakura-tap-highlight-global */
+body.overlay-mode,
+body.overlay-mode #stage,
+body.overlay-mode #portraitWrap,
+body.overlay-mode #portrait {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
 body.overlay-mode #portraitShade {
   background: transparent;
 }

@@ -1,21 +1,59 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
+# R8 / ProGuard rules.
 #
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# Shrinking is enabled for size: without it classes.dex was ~7 MB, i.e. almost
+# the whole 6.9 MB APK. But shrinking can silently break the JavaScript bridge,
+# so the rules below are the part that actually matters.
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# ---- JavaScript bridge -------------------------------------------------------
+#
+# Every @JavascriptInterface method is called BY NAME from JavaScript through
+# the injected `SakuraNative` object. R8 cannot see those call sites, so it would
+# strip or rename them and the bridge would fail at runtime with
+# "SakuraNative.something is not a function".
+#
+# Keep the class, all its members, and the annotation itself.
+-keep class com.sakura.remote.RemoteBridge { *; }
+-keepclassmembers class com.sakura.remote.RemoteBridge {
+    @android.webkit.JavascriptInterface <methods>;
+}
+-keepattributes *Annotation*
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# ---- WebView / Capacitor -----------------------------------------------------
+#
+# Capacitor resolves the host Activity and plugins reflectively.
+-keep class com.getcapacitor.** { *; }
+-keep @com.getcapacitor.annotation.CapacitorPlugin class * { *; }
+-keep class * extends com.getcapacitor.Plugin { *; }
+-keepclassmembers class * extends com.getcapacitor.Plugin {
+    @com.getcapacitor.PluginMethod public <methods>;
+}
+-keepattributes JavascriptInterface
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# WebView callbacks are invoked from native code.
+-keepclassmembers class * extends android.webkit.WebViewClient {
+    public void *(android.webkit.WebView, ...);
+}
+-keepclassmembers class * extends android.webkit.WebChromeClient {
+    public void *(android.webkit.WebView, ...);
+}
+
+# ---- Android components ------------------------------------------------------
+#
+# Activities / Services / Receivers are named in AndroidManifest.xml and
+# instantiated by the framework.
+-keep public class * extends android.app.Activity
+-keep public class * extends android.app.Service
+-keep public class * extends android.content.BroadcastReceiver
+-keep public class * extends android.app.Application
+
+# Custom Views can be inflated from XML by name.
+-keep public class * extends android.view.View {
+    public <init>(android.content.Context);
+    public <init>(android.content.Context, android.util.AttributeSet);
+}
+
+# ---- Diagnostics -------------------------------------------------------------
+#
+# Keep line numbers so a crash report is still readable.
+-keepattributes SourceFile,LineNumberTable
+-renamesourcefileattribute SourceFile

@@ -36,8 +36,14 @@ android {
     }
     buildTypes {
         release {
-            minifyEnabled false
-            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            // 开启 R8 代码压缩 + 资源压缩。
+            // 不开时 classes.dex 约 7 MB，占了 6.9 MB APK 的绝大部分。
+            // 必须配合 proguard-rules.pro 里对 @JavascriptInterface 的保护规则，
+            // 否则 SakuraNative 桥的方法会被裁掉/改名，网页侧直接报
+            // 「xxx is not a function」。
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             if (hasKeystore) {
                 signingConfig signingConfigs.release
             }
