@@ -522,3 +522,21 @@ sakura.host.mobile  →  电脑端对话模型（含长期记忆）
   ⊙ 缩小 = 变成小球     点小球 = 展开
   ＋ = 发图 / 截屏      输入栏上方显示已选图片名和截图序号
 ```
+
+---
+
+## 鸣谢
+
+本项目是 [Sakura Desktop Pet](https://github.com/Rvosy/sakura) 的第三方插件与配套 App。
+
+- **Sakura Desktop Pet**：<https://github.com/Rvosy/sakura>
+  作者 **Rvosy**，B 站 <https://space.bilibili.com/441427122>，MIT License。
+  感谢作者把插件系统设计得足够开放 —— 没有 `sakura.host.*` 这一层服务接口，
+  「手机远程端」这种玩法无从实现。
+- **DeepSeek**：本项目的代码借助 DeepSeek 模型辅助编写（对话式结对：
+  人提需求、判断取舍、真机验证，模型负责查 API、写实现、排查与补测试）。
+  辅助编写仍可能有疏漏，请以实测为准。
+
+> 角色「夜乃桜（Sakura）」及相关立绘、语音资源的版权属于其原作者。
+> 本项目只做技术演示，不包含也不分发任何角色资源。
+

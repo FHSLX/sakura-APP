@@ -10,9 +10,15 @@ AI 计算和语音合成都留在电脑 · 手机只负责显示和播放
 [![Plugin API](https://img.shields.io/badge/Sakura%20Plugin%20API-v4-ff69b4.svg)](#环境要求)
 [![Android](https://img.shields.io/badge/Android-8.0%2B-3ddc84.svg)](#环境要求)
 
-[功能](#功能) · [安装](#安装) · [使用](#使用) · [配置](#配置项) · [疑难解答](#疑难解答) · [技术说明](#技术说明)
+[功能](#功能) · [安装](#安装) · [使用](#使用) · [配置](#配置项) · [疑难解答](#疑难解答) · [技术说明](#技术说明) · [鸣谢](#鸣谢)
 
 </div>
+
+---
+
+> **这是 [Sakura Desktop Pet](https://github.com/Rvosy/sakura) 的第三方插件 + 配套 App，不是官方项目。**
+> 使用前请先安装并跑通官方的 Sakura 桌面端。
+> 官方仓库：[**github.com/Rvosy/sakura**](https://github.com/Rvosy/sakura)
 
 ---
 
@@ -319,12 +325,51 @@ powershell -File tools/install_to_sakura.ps1
 powershell -File tools/build_release.ps1
 ```
 
+### 关于代码编写方式
+
+本项目的代码是**借助 DeepSeek 模型辅助编写**的（对话式结对：由人提出需求、判断方案取舍、
+在真机上验证，模型负责查宿主 API、写实现、排查问题与补测试）。
+
+需要说明的是，这不代表代码没有经过验证：项目里每一处行为都在真机上实测过，
+关键结论都记在文档的「踩过的坑」里（包括若干只有实机才会暴露的问题，
+比如 Android 14 的 MediaProjection 前台服务要求、
+`Path.resolve()` 的 `\\?\` 前缀会让 PowerShell 脚本静默失败等）。
+但**辅助编写仍可能留有疏漏**，请以实测为准；发现问题欢迎提 Issue。
+
 ---
 
 ## 贡献
 
 欢迎提 Issue 和 PR。改前端不需要构建步骤 —— 改完 `static/` 下的文件刷新页面即可
 （插件会按文件修改时间自动加版本号，不会吃到旧缓存）。
+
+---
+
+## 鸣谢
+
+### Sakura Desktop Pet（本项目的基础）
+
+本项目能够存在，完全依赖 [Rvosy](https://github.com/Rvosy) 开发的
+**[Sakura Desktop Pet](https://github.com/Rvosy/sakura)** ——
+一个能主动感知屏幕内容与系统事件的通用桌宠 Agent 框架。
+
+- **项目地址**：<https://github.com/Rvosy/sakura>
+- **作者**：Rvosy
+- **B 站**：<https://space.bilibili.com/441427122>
+- **许可**：MIT License，Copyright © 2026 Rvosy
+
+感谢作者把插件系统设计得足够开放：`sakura.host.*` 这一层服务接口让第三方能在
+不修改宿主体的情况下接入聊天、角色资源、语音与主题。没有这套设计，
+「手机远程端」这种玩法根本无从实现。
+
+> 角色「夜乃桜（Sakura）」及相关立绘、语音资源的版权属于其原作者，
+> 本项目只做技术演示，不包含、也不分发任何角色资源。
+
+### 其他
+
+- 感谢 [Shinsekai](https://github.com/RachelForster/Shinsekai) 项目 ——
+  它在桌宠与插件生态上的探索，间接影响了 Sakura 的设计取向。
+- 感谢 **DeepSeek** 在代码编写过程中提供的辅助（见上一节）。
 
 ---
 
@@ -335,5 +380,5 @@ powershell -File tools/build_release.ps1
 ---
 
 <div align="center">
-<sub>本项目是第三方插件，与 Sakura 官方无隶属关系。</sub>
+<sub>本项目是第三方插件，与 Sakura 官方无隶属关系。所有权利归各自作者所有。</sub>
 </div>
