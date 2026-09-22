@@ -57,6 +57,27 @@ public class RemoteBridge {
         /** 按增量移动窗口（去掉原生标题栏后，拖动由网页手势驱动）。 */
         void moveWindowBy(float dx, float dy);
 
+        /**
+         * 直接把窗口移到指定位置（CSS 像素，左上角为准）。
+         *
+         * 拖动改用绝对定位而不是累加增量：逐帧累加会被每帧取整和边界夹取
+         * 一点点吃掉误差，拖久了窗口和手指就对不上（实测「不跟手」的主因之一）。
+         * 绝对定位下位置只由「手指当前位置」决定，不做累加，因此不会漂。
+         */
+        void setWindowPositionPx(float x, float y);
+
+        /**
+         * 悬浮窗布局信息，供网页换算坐标。
+         *
+         * 返回 JSON：{x, y, w, h, screenW, screenH, density}
+         *   x/y/w/h  窗口位置与尺寸，**设备像素**
+         *   screenW/H 屏幕尺寸，设备像素
+         *   density  设备像素 / CSS 像素
+         *
+         * 网页拖动时要用它把「手指的 CSS 像素坐标」换算成窗口的绝对位置。
+         */
+        String overlayLayoutInfo();
+
         /** 由网页请求调整窗口尺寸（CSS 像素）；原生夹到屏幕范围内。 */
         void setWindowSizePx(float width, float height);
 
@@ -201,6 +222,23 @@ public class RemoteBridge {
     @JavascriptInterface
     public void moveBy(float dx, float dy) {
         host.moveWindowBy(dx, dy);
+    }
+
+    /**
+     * 把窗口直接移到绝对位置（CSS 像素）。
+     *
+     * 拖动改用绝对定位：位置只由「手指当前位置」决定，不做逐帧累加，
+     * 因此不会因为取整和边界夹取而越拖越偏。
+     */
+    @JavascriptInterface
+    public void moveTo(float x, float y) {
+        host.setWindowPositionPx(x, y);
+    }
+
+    /** 悬浮窗布局信息（位置/尺寸/屏幕/密度），供网页换算拖动坐标。 */
+    @JavascriptInterface
+    public String overlayLayout() {
+        return host.overlayLayoutInfo();
     }
 
     /**

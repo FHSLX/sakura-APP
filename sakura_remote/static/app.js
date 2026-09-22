@@ -485,6 +485,18 @@ function installOverlayGestures() {
     holdTimer = 0;
   }
 
+  /**
+   * 下发一次位移（CSS 像素）。
+   *
+   * 用增量而不是绝对定位：绝对定位需要把「手指屏坐标」和「窗口位置」放进
+   * 同一个坐标系，而 WebView 里 screenX/Y 到底按设备像素还是 CSS 像素算，
+   * 没法在没有真机手指输入的情况下证实 —— 赌错一个系数就整条拖动失效。
+   * 增量方式不依赖这个假设，更稳。
+   *
+   * 亚像素精度由原生负责：moveWindowBy 会把不足 1px 的小数余量攒起来，
+   * 凑够 1px 再进位（原来的实现是每帧 Math.round，小数直接丢掉，
+   * 这才是「不跟手」的真正来源）。
+   */
   function move(dx, dy) {
     try {
       native.moveBy(dx, dy);
@@ -512,21 +524,6 @@ function installOverlayGestures() {
     }, HOLD_MS);
   }, { passive: true });
 
-  // ---- 拖动：立即下发，不再等下一帧 ----
-  //
-  // 原来是把一帧内的增量累积起来，用 rAF 合并成一次 moveBy 调用。
-  // 那个做法在「touchmove 触发频率远高于屏幕刷新率」时才划算，
-  // 但代价是**必然多一帧延迟**：touchmove → rAF 回调 → 跨进程 → updateViewLayout，
-  // 手感上就是「不跟手」「发飘」。
-  //
-  // 实测 native.moveBy 单次只要 0.76ms（30 次共 23ms），而且 touchmove 本身
-  // 就是按屏幕刷新率来的，没有合并的必要。所以改成直接下发，
-  // 少掉一帧的等待；同时拖动期间用 body.dragging 关掉滤镜与过渡（见 app.css）。
-  function queueMove(dx, dy) {
-    // 直接走，不再攒帧
-    move(dx, dy);
-  }
-
   target.addEventListener('touchmove', (event) => {
     if (!holding || event.touches.length !== 1) return;
     const touch = event.touches[0];
@@ -542,7 +539,7 @@ function installOverlayGestures() {
     }
     lastX = touch.clientX;
     lastY = touch.clientY;
-    queueMove(dx, dy);
+    move(dx, dy);
     event.preventDefault();
   }, { passive: false });
 
@@ -595,7 +592,8 @@ function installOverlayGestures() {
     }
     lastX = event.clientX;
     lastY = event.clientY;
-    move(dx, dy);
+    // 鼠标路径保留增量方式（只在电脑浏览器里调试用，没有原生悬浮窗）
+    try { native.moveBy(dx, dy); } catch (error) { /* 忽略 */ }
   });
   window.addEventListener('mouseup', () => end(false));
 }
@@ -1302,18 +1300,6 @@ function installBubbleGestures(target) {
   let holdTimer = 0;
   let startX = 0;
   let startY = 0;
-  function moveNative(dx, dy) {
-    if (native && typeof native.moveBy === 'function') {
-      try { native.moveBy(dx, dy); } catch (error) { /* 忽略 */ }
-    }
-  }
-
-  function queueMove(dx, dy) {
-    // 和悬浮窗一样直接下发：moveBy 实测单次仅 0.76ms，
-    // 攒帧只会平白多一帧延迟（手感就是「不跟手」）。
-    // 注意这里要用 moveNative —— 小球这段作用域里没有 move()。
-    moveNative(dx, dy);
-  }
 
   function restore() {
     try { native.setBubbleMode(false); } catch (error) { /* 忽略 */ }
@@ -1345,7 +1331,8 @@ function installBubbleGestures(target) {
       clearTimeout(holdTimer);   // 开始拖动就不叫设置了
     }
     lastX = x; lastY = y;
-    queueMove(dx, dy);
+    // 与悬浮窗同一条路径：增量下发，亚像素余量由原生累积
+    try { native.moveBy(dx, dy); } catch (error) { /* 忽略 */ }
   }
 
   function finish() {
@@ -1369,7 +1356,8 @@ function installBubbleGestures(target) {
   target.addEventListener('touchmove', (event) => {
     if (!holding || event.touches.length !== 1) return;
     const t = event.touches[0];
-    dragTo(t.clientX, t.clientY);
+    // 传屏坐标：小球也用绝对定位（和悬浮窗同一套换算）
+    dragTo(t.clientX, t.clientY, t.screenX, t.screenY);
     event.preventDefault();
   }, { passive: false });
 

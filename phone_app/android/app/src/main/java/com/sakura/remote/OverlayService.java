@@ -136,6 +136,28 @@ public class OverlayService extends Service {
     private float windowHeightRatio;
     private String pendingUrl = "";
 
+    /*
+     * 窗口位置与尺寸的快照（设备像素）。
+     *
+     * overlayLayoutInfo() 会被 JS 桥线程直接调用，而 layoutParams 是 UI 对象、
+     * 只能在主线程读 —— 所以每次 updateLayout() 顺手把值抄一份到这里。
+     * volatile 保证桥线程能看到最新值。
+     */
+    private volatile int lastX;
+    private volatile int lastY;
+    private volatile int lastW;
+    private volatile int lastH;
+
+    /*
+     * 拖动时攒下的亚像素余量。
+     *
+     * WindowManager 的 x/y 必须是整数，而手指每帧的位移常常是小数 ——
+     * 直接取整会把不足 1px 的部分丢掉，累积起来就是「跟不上手」。
+     * 把余量留在这里，凑够 1px 再进位。
+     */
+    private float moveRemainX;
+    private float moveRemainY;
+
     /** 迷你图标（小圆头像）的直径。 */
     private int bubbleSize;
     /** 是否处于迷你图标模式。 */
@@ -379,6 +401,11 @@ public class OverlayService extends Service {
         if (rootView == null || layoutParams == null) {
             return;
         }
+        // 刷新给 JS 桥线程读的快照（见 overlayLayoutInfo）
+        lastX = layoutParams.x;
+        lastY = layoutParams.y;
+        lastW = layoutParams.width;
+        lastH = layoutParams.height;
         try {
             windowManager.updateViewLayout(rootView, layoutParams);
         } catch (Exception ignored) {
@@ -590,16 +617,95 @@ public class OverlayService extends Service {
             if (layoutParams == null || rootView == null) {
                 return;
             }
-            layoutParams.x += Math.round(dx);
-            layoutParams.y += Math.round(dy);
-            int minX = -layoutParams.width + dp(48);
-            int maxX = screenWidth - dp(48);
-            int minY = -layoutParams.height + dp(48);
-            int maxY = screenHeight - dp(48);
-            layoutParams.x = Math.min(maxX, Math.max(minX, layoutParams.x));
-            layoutParams.y = Math.min(maxY, Math.max(minY, layoutParams.y));
+            /*
+             * 亚像素累积，不要每帧直接取整。
+             *
+             * 原来写的是 layoutParams.x += Math.round(dx)：手指慢慢移动时
+             * 每帧的 dx 常常不足 1px，Math.round 一律变成 0 直接丢掉。
+             * 一秒上百帧累积下来，窗口就明显落后于手指 —— 这正是「不跟手」。
+             *
+             * 这里把小数部分攒起来，凑够 1px 再进位，位移一点都不丢。
+             * 注意 remain 必须和位置分开存：位置是整数（WindowManager 要求），
+             * 小数只能靠自己记住。
+             */
+            moveRemainX += dx;
+            moveRemainY += dy;
+            int stepX = (int) Math.floor(moveRemainX);
+            int stepY = (int) Math.floor(moveRemainY);
+            // 负数方向也要正确进位（floor 对 -0.5 给 -1，remain 留 +0.5）
+            moveRemainX -= stepX;
+            moveRemainY -= stepY;
+            if (stepX == 0 && stepY == 0) {
+                // 还没攒够 1px，位置不用动，但保留余量等下一帧
+                return;
+            }
+            layoutParams.x += stepX;
+            layoutParams.y += stepY;
+            clampWindowPosition();
             updateLayout();
         });
+    }
+
+    /**
+     * 把窗口直接移到绝对位置（CSS 像素）。
+     *
+     * 为什么改成绝对定位：
+     * 原先是网页逐帧报增量、这里累加。累加有两个无法避免的漂移源 ——
+     *   1) 每帧 Math.round(dx)：dx 常常不足 1px，取整后直接丢掉，
+     *      一秒钟上百帧累积下来就是明显的「跟不上手指」；
+     *   2) 边界夹取：撞到边缘时丢掉的那部分位移不会再补回来。
+     * 绝对定位下位置只由「手指当前位置 - 按下时的抓取点」决定，
+     * 不做任何累加，因此拖多久都不会偏。
+     *
+     * 这里只把 CSS 像素换成设备像素并夹到屏幕范围内。
+     */
+    public void setWindowPositionPx(final float x, final float y) {
+        final float density = currentDensity();
+        handler.post(() -> {
+            if (layoutParams == null || rootView == null) {
+                return;
+            }
+            layoutParams.x = Math.round(x * density);
+            layoutParams.y = Math.round(y * density);
+            clampWindowPosition();
+            updateLayout();
+        });
+    }
+
+    /** 悬浮窗布局信息，JSON 格式；供网页换算拖动坐标。 */
+    public String overlayLayoutInfo() {
+        final float density = currentDensity();
+        int x = 0;
+        int y = 0;
+        int w = 0;
+        int h = 0;
+        // layoutParams 只能在主线程读，但这里被 JS 桥线程直接调用，
+        // 所以用 volatile 快照值（每次 updateLayout 时刷新）。
+        x = lastX;
+        y = lastY;
+        w = lastW;
+        h = lastH;
+        return "{\"x\":" + x + ",\"y\":" + y + ",\"w\":" + w + ",\"h\":" + h
+                + ",\"screenW\":" + screenWidth + ",\"screenH\":" + screenHeight
+                + ",\"density\":" + density + "}";
+    }
+
+    private float currentDensity() {
+        float density = getResources().getDisplayMetrics().density;
+        return density > 0f ? density : 1f;
+    }
+
+    /** 边界夹取：至少留 dp(48) 在屏幕内；抽出来给两条移动路径共用。 */
+    private void clampWindowPosition() {
+        if (layoutParams == null) {
+            return;
+        }
+        int minX = -layoutParams.width + dp(48);
+        int maxX = screenWidth - dp(48);
+        int minY = -layoutParams.height + dp(48);
+        int maxY = screenHeight - dp(48);
+        layoutParams.x = Math.min(maxX, Math.max(minX, layoutParams.x));
+        layoutParams.y = Math.min(maxY, Math.max(minY, layoutParams.y));
     }
 
     // ---- 前台通知 --------------------------------------------------
@@ -753,6 +859,16 @@ public class OverlayService extends Service {
         @Override
         public void moveWindowBy(float dx, float dy) {
             OverlayService.this.moveWindowBy(dx, dy);
+        }
+
+        @Override
+        public void setWindowPositionPx(float x, float y) {
+            OverlayService.this.setWindowPositionPx(x, y);
+        }
+
+        @Override
+        public String overlayLayoutInfo() {
+            return OverlayService.this.overlayLayoutInfo();
         }
 
         @Override

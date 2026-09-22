@@ -350,6 +350,22 @@ public class MainActivity extends BridgeActivity implements RemoteBridge.Host {
         // no-op：仅悬浮窗支持
     }
 
+    /** App 是整屏窗口，没有可拖动的悬浮位置。 */
+    @Override
+    public void setWindowPositionPx(float x, float y) {
+        // no-op：仅悬浮窗支持
+    }
+
+    /**
+     * App 页也能被当作普通网页打开，此时拿不到悬浮窗布局信息。
+     *
+     * 返回空对象而不是 null —— 网页侧会读它的字段，null 会直接抛异常。
+     */
+    @Override
+    public String overlayLayoutInfo() {
+        return "{}";
+    }
+
     /** App 是整屏窗口，尺寸固定。 */
     @Override
     public void setWindowSizePx(float width, float height) {
