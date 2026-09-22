@@ -3,13 +3,20 @@
 # Why a script: a release bundle must not carry this machine's runtime data
 # (token, logs, caches), and picking files by hand is easy to get wrong.
 # This declares exactly what goes in, and runs a privacy scan that FAILS the
-# build if any hardcoded private string is found.
+# build if anything that looks like a secret is found.
 #
 # Usage:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools\build_release.ps1
 #
 # NOTE: keep this file pure ASCII. Windows PowerShell 5.1 reads BOM-less
-# UTF-8 as ANSI, and non-ASCII characters here will break parsing.
+# UTF-8 as ANSI, and non-ASCII characters here can break parsing.
+
+param(
+    # Optional fixed output directory. Defaults to dist\release-<timestamp>.
+    # Useful for rebuilding into the same folder, and for testing the
+    # privacy scan itself (put a probe file in, run again, expect failure).
+    [string]$OutDir = ""
+)
 
 $ErrorActionPreference = "Stop"
 
@@ -24,8 +31,12 @@ if (-not (Test-Path $pluginSrc)) {
     throw "Plugin source not found: $pluginSrc"
 }
 
-$stamp = Get-Date -Format "yyyyMMdd-HHmm"
-$out = Join-Path $root ("dist\release-" + $stamp)
+if ($OutDir) {
+    $out = $OutDir
+} else {
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $out = Join-Path $root ("dist\release-" + $stamp)
+}
 $pluginDst = Join-Path $out "plugin\sakura.remote"
 New-Item -ItemType Directory -Force -Path $pluginDst | Out-Null
 
@@ -57,39 +68,63 @@ if (Test-Path $manual) {
 
 # 4) Privacy scan.
 #
-# Instead of matching a fixed list of strings (which would have to contain the
-# very secrets we are trying to detect), this flags *shapes* that should never
-# appear in a release bundle:
-#   * private LAN addresses
-#   * absolute Windows paths pointing at a real install
-#   * obvious placeholder tokens
-# It is intentionally generic, so it never needs to embed anyone's real values.
-$shapePatterns = @(
-    @{ name = "private LAN IP";  re = '\b(?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\b' },
-    @{ name = "absolute Windows path"; re = '[A-Za-z]:\\\\?(?:sakura|Sakura|Users|projects|repos|src)\\' },
-    @{ name = "looks like a token"; re = '(?i)(?:token|secret|password)\s*[:=]\s*"[A-Za-z0-9_\-]{16,}"' },
-    @{ name = "placeholder left in"; re = '(?i)(?:your-username|example-personal|todo[_-]replace[_-]me|change[_-]?me)' }
+# Flags *shapes* that must never ship, rather than a fixed list of strings
+# (a fixed list would have to contain the very secrets we are hunting).
+# The customary documentation addresses are whitelisted so examples pass.
+$exampleIps = "192.168.1.100 192.168.1.1 192.168.0.1 192.168.1.10 10.0.0.1 10.0.0.2 127.0.0.1"
+
+$reLanIp = "\b(?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\b"
+$reWinPath = "[A-Za-z]:\\\\?(?:sakura|Sakura|Users|projects|repos|src)\\\\"
+$reToken = "(?i)(?:token|secret|password)\s*[:=]\s*""[A-Za-z0-9_\-]{16,}"""
+$rePlaceholder = "(?i)(your-username|example-personal|todo[_-]replace[_-]me|change[_-]?me)"
+
+$rules = @(
+    @{ name = "real LAN IP"; regex = $reLanIp; isIp = $true },
+    @{ name = "absolute Windows path"; regex = $reWinPath; isIp = $false },
+    @{ name = "hardcoded token"; regex = $reToken; isIp = $false },
+    @{ name = "leftover placeholder"; regex = $rePlaceholder; isIp = $false }
 )
-$hits = @()
-$textExtensions = @(".py", ".js", ".css", ".json", ".md", ".xml", ".html", ".yaml", ".webmanifest")
-Get-ChildItem $out -Recurse -File |
-    Where-Object { $textExtensions -contains $_.Extension } |
-    ForEach-Object {
-        $text = [IO.File]::ReadAllText($_.FullName, [Text.UTF8Encoding]::new($false))
-        foreach ($p in $shapePatterns) {
-            if ($text -match $p.re) {
-                $relative = $_.FullName.Replace(($out + "\"), "")
-                $hits += ($relative + "  looks like " + $p.name)
+
+$textExtensions = ".py .js .mjs .cjs .ts .css .json .md .txt .xml .html .htm .yaml .yml .webmanifest .ps1 .bat .cmd .sh .ini .cfg .conf .env .properties .gradle .pro .java .kt .toml"
+$allowedExtensions = $textExtensions.Split(" ")
+
+$allFiles = @(Get-ChildItem -LiteralPath $out -Recurse -File -ErrorAction SilentlyContinue)
+$scanned = 0
+$hits = New-Object System.Collections.ArrayList
+
+foreach ($file in $allFiles) {
+    $lowerName = $file.Name.ToLower()
+    $ext = $file.Extension.ToLower()
+    $isText = $allowedExtensions -contains $ext
+    if (-not $isText -and $lowerName -notlike "*.env" -and $lowerName -ne ".env") {
+        continue
+    }
+    $scanned = $scanned + 1
+    $text = [IO.File]::ReadAllText($file.FullName, [Text.UTF8Encoding]::new($false))
+    $relative = $file.FullName.Replace($out + "\", "")
+
+    foreach ($rule in $rules) {
+        $found = [Regex]::Matches($text, $rule.regex)
+        foreach ($m in $found) {
+            if ($rule.isIp -and $exampleIps.Contains($m.Value)) {
+                continue
             }
+            [void]$hits.Add($relative + "  ->  " + $rule.name + "  (" + $m.Value + ")")
         }
     }
+}
+
+Write-Host ("Privacy scan: {0} of {1} files inspected" -f $scanned, $allFiles.Count)
 
 if ($hits.Count -gt 0) {
-    Write-Host "PRIVACY SCAN FAILED -- bundle kept at $out for inspection" -ForegroundColor Red
-    $hits | ForEach-Object { Write-Host ("   " + $_) -ForegroundColor Red }
+    Write-Host "PRIVACY SCAN FAILED -- bundle kept for inspection at:" -ForegroundColor Red
+    Write-Host ("  " + $out) -ForegroundColor Red
+    foreach ($h in $hits) {
+        Write-Host ("  " + $h) -ForegroundColor Red
+    }
     exit 1
 }
-Write-Host "Privacy scan passed (no LAN IPs, absolute paths, or leftover keys)" -ForegroundColor Green
+Write-Host "Privacy scan passed (no LAN IPs, absolute paths, tokens, or placeholders)" -ForegroundColor Green
 
 # 5) Package.
 Compress-Archive -Path (Join-Path $out "plugin\*") `

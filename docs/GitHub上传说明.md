@@ -1,10 +1,10 @@
 # 上传到 GitHub
 
-仓库已经在 `E:\sakura-remote-repo` 初始化好并提交了 2 个 commit。
+仓库已经在 `<仓库目录>` 初始化好并提交了 2 个 commit。
 
-> ⚠️ **不要**直接在 `E:\项目\移植` 里 `git init` —— 那个目录有 1.8 GB 的
+> ⚠️ **不要**直接在 `<本项目源码目录>` 里 `git init` —— 那个目录有 1.8 GB 的
 > Android SDK / gradle 缓存，以及签名密钥，很容易误提交。
-> 已经给你准备好了干净的 `E:\sakura-remote-repo`（95 个文件，4 MB）。
+> 已经给你准备好了干净的 `<仓库目录>`（95 个文件，4 MB）。
 
 ---
 
@@ -30,7 +30,7 @@ https://github.com/<你的用户名>/sakura-remote.git
 ## 二、关联并推送
 
 ```powershell
-cd E:\sakura-remote-repo
+cd <仓库目录>
 
 # 关联远端（把 URL 换成你自己的）
 git remote add origin https://github.com/<你的用户名>/sakura-remote.git
@@ -57,7 +57,7 @@ gh repo create sakura-remote --public --source=. --push
 ## 三、推送前建议再确认一次
 
 ```powershell
-cd E:\sakura-remote-repo
+cd <仓库目录>
 
 # 1) 确认没有任何密钥/构建产物
 git ls-files | Select-String -Pattern '\.jks|keystore|local\.properties|\.apk$|node_modules'
@@ -79,7 +79,7 @@ git status
 ### 1. 打版本标签
 
 ```powershell
-cd E:\sakura-remote-repo
+cd <仓库目录>
 git tag -a v1.0.0 -m "首个公开版本"
 git push origin v1.0.0
 ```
@@ -106,20 +106,20 @@ GitHub → Releases → Draft a new release → 选 `v1.0.0` → 上传附件：
 
 ## 五、后续更新代码时
 
-改了 `E:\项目\移植` 里的源码后，需要同步到仓库目录：
+改了 `<本项目源码目录>` 里的源码后，需要同步到仓库目录：
 
 ```powershell
 # 同步插件源码（不动 .git）
-robocopy E:\项目\移植\sakura_remote E:\sakura-remote-repo\sakura_remote /MIR `
+robocopy <本项目源码目录>\sakura_remote <仓库目录>\sakura_remote /MIR `
   /XD __pycache__ /XF *.pyc
 
 # 同步文档
-Copy-Item E:\项目\移植\README.md E:\sakura-remote-repo\README.md -Force
-Copy-Item E:\项目\移植\docs\使用手册.md E:\sakura-remote-repo\docs\ -Force
-Copy-Item E:\项目\移植\docs\使用手册.md E:\sakura-remote-repo\docs\manual.md -Force
+Copy-Item <本项目源码目录>\README.md <仓库目录>\README.md -Force
+Copy-Item <本项目源码目录>\docs\使用手册.md <仓库目录>\docs\ -Force
+Copy-Item <本项目源码目录>\docs\使用手册.md <仓库目录>\docs\manual.md -Force
 
 # 提交
-cd E:\sakura-remote-repo
+cd <仓库目录>
 git add -A
 git commit -m "描述你的改动"
 git push
