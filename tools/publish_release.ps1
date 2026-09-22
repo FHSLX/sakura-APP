@@ -64,8 +64,16 @@ function Invoke-Api {
     }
     if ($null -ne $Body) {
         if ($ContentType -eq "application/json") {
-            $params.Body = $Body | ConvertTo-Json -Depth 6
-            $params.ContentType = "application/json"
+            $json = $Body | ConvertTo-Json -Depth 6
+            # 必须转成 UTF-8 字节再发。
+            #
+            # PowerShell 5.1 的 Invoke-RestMethod 发**字符串** body 时会按
+            # ASCII 编码，每个非 ASCII 字符被替换成一个 '?'。本次实测：
+            # 正文里的中文全部变成 ??? 存到了 GitHub 上（网页源码就是
+            # <h2>????</h2>），而字符数不变，所以长度校验发现不了。
+            # 传 byte[] 时走的是原始字节，不会经过这层转换。
+            $params.Body = [Text.Encoding]::UTF8.GetBytes($json)
+            $params.ContentType = "application/json; charset=utf-8"
         } else {
             $params.Body = $Body
             $params.ContentType = $ContentType
