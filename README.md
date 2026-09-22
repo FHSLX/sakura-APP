@@ -18,6 +18,36 @@ AI 计算和语音合成都留在电脑 · 手机只负责显示和播放
 
 ---
 
+---
+
+## 两个仓库的分工
+
+本项目的代码分成两个仓库，各有明确用途：
+
+| 仓库 | 用途 | 里面有什么 |
+| :--- | :--- | :--- |
+| [**sakura-remote-plugin**](https://github.com/FHSLX/sakura-remote-plugin) | **给 Sakura 插件市场投稿**（作者维护） | 只有插件：`plugin.yaml`、Python 源码、`static/`（约 300 KB） |
+| **sakura-APP**（本仓库） | **发布 App 与插件包**（用户下载） | 插件源码 + 安卓 App 工程 + 文档 + 工具 |
+
+**为什么要分开**：插件市场按「仓库根目录 = 插件」打包，
+如果把安卓工程也放进去，装插件的人会白下载一整个 Android 项目。
+反过来，用户下载 App 需要的是一个带 Releases 的仓库，那又必须放 App 工程。
+
+### ⚠️ 改插件时的同步规则
+
+**插件源码的唯一维护点是 [sakura-remote-plugin](https://github.com/FHSLX/sakura-remote-plugin)。**
+本仓库里的那份是**给发布用的副本**，改了插件之后要两边都更新：
+
+```
+插件文件（共 10 项）
+  plugin.yaml  plugin.py  http_server.py  web_ui.py
+  config.json  restart_helper.ps1  static/app.css  static/app.js
+  static/manifest.webmanifest  LICENSE
+```
+
+顺带说明：两份的 `README` 定位不同 —— 插件仓库的 README 是插件门面，
+本仓库的 `PLUGIN.md` 才是插件技术文档（含踩坑记录），两者内容不同、不要互相覆盖。
+
 ## 先读这一段
 
 **本项目不自带任何 AI 能力，它只是 [Sakura Desktop Pet](https://github.com/Rvosy/sakura) 的一个扩展。**
