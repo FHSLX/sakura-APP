@@ -405,9 +405,18 @@ body.overlay-mode #msgButtons button:disabled {
 body.overlay-mode #msgButtons button:active { transform: scale(0.94); }
 
 /* 悬浮窗里不再用原始气泡列表（改由上面的对话框卡片呈现），
-   但节点保留在 DOM 里 —— 语音播放和语气表情都依赖它们。 */
+   但节点保留在 DOM 里 —— 语音播放和语气表情都依赖它们。
+ *
+ * 必须用 position: fixed 而不是 absolute。
+ * 悬浮窗的布局是 flex 列：#stage → #msgNav → #composer，
+ * 而 absolute 元素**仍然占据文档流中的位置**（实测这里占 12px 高），
+ * 于是这 12px 就卡在立绘和输入栏之间 —— 气泡一隐藏、窗口变矮，
+ * 它就变成肉眼可见的空隙（实测立绘底到输入栏 20px，本该是 0）。
+ * fixed 会完全脱离文档流，同时节点照样留在 DOM 里给语音和表情用。 */
 body.overlay-mode #bubbles {
-  position: absolute;
+  position: fixed;
+  left: 0;
+  top: 0;
   width: 1px;
   height: 1px;
   overflow: hidden;
@@ -442,6 +451,19 @@ body.overlay-mode .bubbleRow.assistant .bubble {
 body.overlay-mode #composer {
   /* 三段式里它是第三段，按内容高度排在最下面（不再绝对定位叠在立绘上） */
   flex: 0 0 auto;
+  /*
+   * 必须显式写 position: static。
+   *
+   * 基础规则是 #composer { position: fixed }，而 fixed 会**脱离文档流** ——
+   * 于是它在悬浮窗的 flex 列里不占位置，窗口高度由 JS 的 measure() 申请；
+   * 而 measure() 用 el.composer.offsetHeight 量输入栏高度，fixed 元素的
+   * offsetHeight 被钳成 0，只能退回兜底值 70（实际 69 + 8 = 77），
+   * 算出来的窗口就比内容高 20px。
+   * 表现：气泡一隐藏、窗口变矮，立绘和输入栏之间空出 20px。
+   * 改回 static 后它作为 flex 项正常占位，offsetHeight 也能量准，
+   * 窗口高度正好等于「立绘 + 对话框 + 输入栏」。
+   */
+  position: static;
   margin: 0 auto;
   width: var(--pet-content-w, 100%);
   max-width: min(var(--pet-content-w, 100%), 100%);
@@ -804,50 +826,48 @@ body.overlay-mode .bubbleRow.current {
   animation: rise 160ms ease both;
 }
 
-/* ---- 缩小为小球：只在悬浮模式出现 ---- */
-
+/* ---- 缩小为小球：按钮已并进输入栏那一行 ----
+ *
+ * #miniBar 这个包裹层保留在 DOM 里（JS 仍按 id 找它、设 .hidden），
+ * 但用 display:contents 让它**不产生任何盒子** —— 于是它不再占高度，
+ * 立绘和输入栏之间那 25px 的空隙就没了。
+ *
+ * 为什么这么做：原来按钮独占一行夹在立绘和输入栏之间，
+ * 气泡一隐藏，窗口变矮但那一行还在，立绘和输入栏之间就空出整整一行，
+ * 看起来就是「对话框收起来了但中间还是很远」。
+ */
 body.overlay-mode .miniBar {
-  display: flex;
-  justify-content: flex-end;
-  flex: 0 0 auto;
-  /*
-   * 宽度必须夹到视口内。
-   *
-   * --pet-content-w 是按「屏幕宽」算的目标值（如 381px），而悬浮窗实际
-   * 可能只有 319px 宽 —— 不夹取的话这一行会撑到 381px，右对齐的按钮
-   * 被推到 x=324（视口外），完全点不到。
-   * 实测：按钮 x=324 w=57，而视口只有 319，等于「按钮消失了」。
-   * #msgNav / #composer 早就夹了，这里和 #hint 之前漏了。
-   */
-  width: var(--pet-content-w, 100%);
-  max-width: min(var(--pet-content-w, 100%), 100%);
-  box-sizing: border-box;
-  margin: 0 auto;
-  padding: 0 0 2px;
+  display: contents;
 }
 
-.miniBar.hidden { display: none; }
-/* 非悬浮模式（配置页/App 内）不需要这个按钮 */
-body:not(.overlay-mode) .miniBar { display: none; }
+/* display:contents 之下 .hidden 也不会隐藏子元素（子元素已移到别处），
+   所以只需要管非悬浮模式：那时整个按钮不该出现。 */
+body:not(.overlay-mode) #miniButton {
+  display: none;
+}
 
+/* 输入栏里的圆形「缩小」按钮，和 ＋ 按钮同一行 */
 #miniButton {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  padding: 0;
   display: inline-flex;
   align-items: center;
-  gap: 3px;
-  padding: 3px 10px;
-  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--input-bg) 90%, transparent);
+  justify-content: center;
+  border: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--input-bg) 92%, transparent);
   backdrop-filter: blur(10px);
   color: var(--secondary-text);
   font: inherit;
-  font-size: 11px;
-  line-height: 1.4;
+  font-size: 15px;
+  line-height: 1;
   cursor: pointer;
 }
 
 #miniButton:active {
-  transform: scale(0.95);
+  transform: scale(0.94);
   background: color-mix(in srgb, var(--primary) 16%, transparent);
 }
 
@@ -1613,12 +1633,14 @@ body:not(.overlay-mode) .bubbleRow.navHit .bubble {
 
 #form {
   display: grid;
-  /* 三列：媒体菜单(＋) | 输入框 | 发送。
+  /* 四列：媒体菜单(＋) | 输入框 | 缩小(⊙) | 发送。
      原来「图」「截屏」各占一列，悬浮窗很窄时输入框被挤得只剩一点；
      现在两者收进 ＋ 的下拉菜单，输入框拿到全部剩余宽度。
+     「缩小」原本独占立绘与输入栏之间的一整行，气泡隐藏后会留出一条空隙，
+     挪到这里当第四个控件。
      注意列数要和实际控件数一致 —— 多一个控件会把「发送」挤到第二行。 */
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 8px;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  gap: 6px;
   align-items: end;
 }
 

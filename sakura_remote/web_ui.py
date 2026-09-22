@@ -315,10 +315,14 @@ _PAGE = """<!doctype html>
 
 <div id="hint">轻触屏幕任意处即可开启语音</div>
 
-<!-- 最小化成圆形小球：放在输入栏上方单独一行，避免和对话框挤在一起 -->
-<div id="miniBar" class="miniBar hidden">
-  <button id="miniButton" type="button" aria-label="缩小为小球" title="缩小为小球">⊙ 缩小</button>
-</div>
+<!-- 缩小为小球的按钮。
+     原来它单独占一行（#miniBar），夹在立绘和输入栏之间 ——
+     于是气泡隐藏后，立绘和输入栏之间会留出整整一行（约 25px）的空隙，
+     看起来就是「对话框收起来了但中间还是隔得很远」。
+     现在并进输入栏那一行，空隙自然消失。
+     #miniBar 这个包裹层保留在 DOM 里（JS 与样式仍按 id 找它），
+     但用 CSS 把它设为 display:contents，让它不产生任何盒子。 -->
+<div id="miniBar" class="miniBar hidden"></div>
 
 <footer id="composer">
   <form id="form">
@@ -334,6 +338,7 @@ _PAGE = """<!doctype html>
     </div>
     <input id="image" type="file" accept="image/*" class="hidden">
     <textarea id="text" rows="1" placeholder="说点什么…" autocomplete="off"></textarea>
+    <button id="miniButton" type="button" aria-label="缩小为小球" title="缩小为小球">⊙</button>
     <button id="send" type="submit">发送</button>
   </form>
   <!-- 已选内容提示：让用户看清选了什么图 / 截了几张，避免"发了但不知道发了啥" -->
