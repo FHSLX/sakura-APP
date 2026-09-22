@@ -285,6 +285,16 @@ _PAGE = """<!doctype html>
 
     </div>
   </div>
+
+  <!-- 保存栏：放在 #configBody 之外，才会固定在底部（跟 header 一样）。
+       放在 body 里面会跟着内容一起滚走，用户滑到中间就看不见了。
+       显示类设置（大小/位置/字号/开关）本来就是改一下存一下，
+       这个按钮给用户一个明确的「我已经保存了」的确认点，
+       并把状态写清楚，避免「改了到底有没有生效」的疑虑。 -->
+  <div id="configFooter" class="configFooter">
+    <span id="saveState" class="saveState">设置会自动保存</span>
+    <button id="saveAllButton" class="primaryButton" type="button">保存设置</button>
+  </div>
 </section>
 
 <section id="bubbles" aria-live="polite"></section>

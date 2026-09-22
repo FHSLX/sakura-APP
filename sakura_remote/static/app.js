@@ -81,6 +81,8 @@ const el = {
   miniBar: document.getElementById('miniBar'),
   miniButton: document.getElementById('miniButton'),
   miniConfigButton: document.getElementById('miniConfigButton'),
+  saveState: document.getElementById('saveState'),
+  saveAllButton: document.getElementById('saveAllButton'),
   bubbleHideRange: document.getElementById('bubbleHideRange'),
   bubbleHideNumber: document.getElementById('bubbleHideNumber'),
   bubbleHideValue: document.getElementById('bubbleHideValue'),
@@ -155,6 +157,14 @@ const state = {
   screenshotCount: 0,
   /** 对话框卡片上次实际渲染出来的高度（隐藏时用来给立绘补位） */
   lastNavHeight: 0,
+  /**
+   * 对话框自动隐藏秒数（0 = 一直显示），保存栏要用。
+   *
+   * 这里写字面量 12 而不是 BUBBLE_HIDE_DEFAULT —— 那个常量在后面才声明，
+   * 引用它会触发 TDZ（实测报 "Cannot access 'state' before initialization"，
+   * 整个页面都起不来）。数值需与 BUBBLE_HIDE_DEFAULT 保持一致。
+   */
+  bubbleHideSec: 12,
 };
 
 const PORTRAIT_SCALE_KEY = 'sakura.remote.portraitScale';
@@ -233,6 +243,7 @@ function applyPortraitOffset(value, options = {}) {
       && typeof relayoutOverlay === 'function' && isOverlayPage()) {
     relayoutOverlay();
   }
+  updateSaveState();
 }
 
 /** 字体大小：只影响对话框里的文字。 */
@@ -249,6 +260,7 @@ function applyFontScale(value, options = {}) {
   }
   // 字变了卡片高度也变，要让窗口跟着调整
   if (typeof relayoutOverlay === 'function' && isOverlayPage()) relayoutOverlay();
+  updateSaveState();
 }
 
 /** 对话框位置：像素微调。 */
@@ -268,6 +280,7 @@ function applyDialogShift(x, y, options = {}) {
       localStorage.setItem(DIALOG_Y_KEY, String(offsetY));
     } catch (error) { /* 忽略 */ }
   }
+  updateSaveState();
 }
 
 /** 立绘上下浮动开关（呼吸动画）。 */
@@ -279,6 +292,7 @@ function applyPortraitFloat(value, options = {}) {
     try {
       localStorage.setItem(FLOAT_KEY, state.portraitFloat ? 'true' : 'false');
     } catch (error) { /* 忽略 */ }
+    updateSaveState();
   }
 }
 
@@ -324,6 +338,7 @@ function applyPortraitScale(value, options = {}) {
       relayoutOverlay();
     }, 450);
   }
+  updateSaveState();
 }
 
 function nativeBridge() {
@@ -1404,6 +1419,7 @@ function applyShowOriginal(value) {
   if (el.showOriginalToggle) el.showOriginalToggle.checked = state.showOriginal;
   writeBool(SHOW_ORIGINAL_KEY, state.showOriginal);
   applySubtitleFallback();
+  updateSaveState();
 }
 
 /** 中文译文开关（双语字幕的另一半）。 */
@@ -1413,6 +1429,7 @@ function applyShowTranslation(value) {
   if (el.showTranslationToggle) el.showTranslationToggle.checked = state.showTranslation;
   writeBool(SHOW_TRANSLATION_KEY, state.showTranslation);
   applySubtitleFallback();
+  updateSaveState();
 }
 
 /**
@@ -1429,9 +1446,12 @@ function applyAutoScroll(value) {
   state.autoScroll = !!value;
   if (el.autoScrollToggle) el.autoScrollToggle.checked = state.autoScroll;
   writeBool(AUTO_SCROLL_KEY, state.autoScroll);
+  updateSaveState();
 }
 
 function loadDisplayPrefs() {
+  // 回放偏好期间不提示「有改动」，这不算用户的修改（见 updateSaveState）
+  updateSaveState._loading = true;
   applyShowOriginal(readBool(SHOW_ORIGINAL_KEY, true));
   applyShowTranslation(readBool(SHOW_TRANSLATION_KEY, true));
   applyAutoScroll(readBool(AUTO_SCROLL_KEY, true));
@@ -1453,6 +1473,74 @@ function loadDisplayPrefs() {
   );
   applyPortraitFloat(readBool(FLOAT_KEY, true), { persist: false });
   applyBubbleHideDelay(stored(BUBBLE_HIDE_DELAY_KEY, BUBBLE_HIDE_DEFAULT), { persist: false });
+  updateSaveState._loading = false;
+  setSaveState('设置会自动保存', false);
+}
+
+/* ---------- 配置页底部保存栏 ----------
+ *
+ * 显示类设置本来就是「改一下存一下」（立刻写 localStorage 并生效），
+ * 但用户看不到这件事，会担心「改了到底有没有生效」。
+ * 所以加一个显式的保存按钮 + 状态文字：
+ *   - 任何设置变动 → 状态变成「有改动未保存」
+ *   - 点保存 → 把所有显示偏好重新写一遍，状态变「已保存」并短暂高亮
+ * 按钮不改变功能语义（不会出现「不点就不生效」），只是把已发生的事说清楚。
+ */
+
+function setSaveState(text, saved) {
+  if (!el.saveState) return;
+  el.saveState.textContent = text;
+  el.saveState.classList.toggle('saved', !!saved);
+  clearTimeout(setSaveState._timer);
+  if (saved) {
+    // 3 秒后回到中性提示，否则会一直停在「已保存」
+    setSaveState._timer = setTimeout(() => {
+      if (el.saveState) {
+        el.saveState.textContent = '设置会自动保存';
+        el.saveState.classList.remove('saved');
+      }
+    }, 3000);
+  }
+}
+
+/** 有设置变动时调用：提示用户「已自动保存，也可点按钮确认」。 */
+function updateSaveState() {
+  // 启动时回放存储里的偏好也会走到这里，那不是「用户的改动」。
+  // 不抑制的话一打开配置页就显示「有改动」，反而让人以为没保存好。
+  if (updateSaveState._loading) return;
+  setSaveState('已自动保存 · 可点右侧按钮确认', false);
+}
+
+function readNumber(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw === null ? fallback : Number(raw);
+  } catch (error) {
+    return fallback;
+  }
+}
+
+/** 把所有显示偏好重新写进本机存储，并给出明确反馈。 */
+function saveAllDisplaySettings() {
+  try {
+    localStorage.setItem(PORTRAIT_SCALE_KEY, String(state.portraitScale || 1));
+    localStorage.setItem(PORTRAIT_Y_KEY, String(state.portraitY || 0));
+    localStorage.setItem(FONT_SCALE_KEY, String(state.fontScale || 100));
+    localStorage.setItem(DIALOG_X_KEY, String(state.dialogX || 0));
+    localStorage.setItem(DIALOG_Y_KEY, String(state.dialogY || 0));
+    localStorage.setItem(FLOAT_KEY, state.portraitFloat ? 'true' : 'false');
+    localStorage.setItem(SHOW_ORIGINAL_KEY, state.showOriginal ? 'true' : 'false');
+    localStorage.setItem(SHOW_TRANSLATION_KEY, state.showTranslation ? 'true' : 'false');
+    localStorage.setItem(AUTO_SCROLL_KEY, state.autoScroll ? 'true' : 'false');
+    localStorage.setItem(
+      BUBBLE_HIDE_DELAY_KEY,
+      String(Math.max(0, Math.min(60, Math.round(Number(state.bubbleHideSec) || 0))))
+    );
+  } catch (error) {
+    setSaveState('保存失败：本机存储不可用', false);
+    return;
+  }
+  setSaveState('已保存 ✓', true);
 }
 
 /**
@@ -2343,6 +2431,7 @@ function installBubbleTapToHide() {
 /** 配置页的「对话框自动隐藏」秒数（0 = 一直显示）。 */
 function applyBubbleHideDelay(seconds, options = {}) {
   const value = Math.max(0, Math.min(60, Math.round(Number(seconds) || 0)));
+  state.bubbleHideSec = value;   // 保存栏要用它写回存储
   const label = value === 0 ? '一直显示' : value + ' 秒';
   syncControl(el.bubbleHideRange, el.bubbleHideNumber, [el.bubbleHideValue], value, '');
   if (el.bubbleHideValue) el.bubbleHideValue.textContent = label;
@@ -2350,6 +2439,7 @@ function applyBubbleHideDelay(seconds, options = {}) {
     try {
       localStorage.setItem(BUBBLE_HIDE_DELAY_KEY, String(value));
     } catch (error) { /* 存不了也不影响使用 */ }
+    updateSaveState();
   }
   // 立即按新设置生效：0 就取消隐藏，否则重新计时
   if (value === 0) {
@@ -2782,6 +2872,10 @@ if (el.floatToggle) {
   el.floatToggle.addEventListener('change', () => {
     applyPortraitFloat(el.floatToggle.checked);
   });
+}
+
+if (el.saveAllButton) {
+  el.saveAllButton.addEventListener('click', saveAllDisplaySettings);
 }
 
 if (el.tokenReveal) {

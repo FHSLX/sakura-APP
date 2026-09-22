@@ -83,10 +83,12 @@ const window = {
 };
 
 const fn = new Function(
-  'el', 'state', 'document', 'localStorage', 'window',
+  'el', 'state', 'document', 'localStorage', 'window', 'updateSaveState',
   snippet + '\nreturn { applyPortraitScale, clampPortraitScale, loadPortraitScale, PORTRAIT_SCALE_MIN, PORTRAIT_SCALE_MAX };'
 );
-const api = fn(el, state, document, localStorage, window, undefined);
+// updateSaveState 是配置页底部保存栏的提示函数（改动后提示「已自动保存」）。
+// 缩放逻辑会在持久化后调用它，桩里给个空实现即可 —— 这里不测保存栏。
+const api = fn(el, state, document, localStorage, window, () => {});
 
 // 1) 正常缩放写进 CSS 变量
 api.applyPortraitScale(1.3);
