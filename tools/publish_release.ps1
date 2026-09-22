@@ -123,7 +123,13 @@ if (-not (Test-Path $notesPath)) {
     Write-Host "缺少 docs\Release说明.md（Release 正文）" -ForegroundColor Red
     exit 1
 }
-$notes = Get-Content $notesPath -Raw -Encoding UTF8
+# 必须用 [IO.File]::ReadAllText 读。
+#
+# 踩过的坑：Get-Content -Raw 返回的不是纯字符串，而是带 .value 属性的对象
+# （PSObject 包装）。ConvertTo-Json 会把它当对象序列化，正文变成
+#   { "body": { "value": "## 下载哪个..." } }
+# 一份 1 KB 的说明膨胀成 108 MB，GitHub 直接回 400 Problems parsing JSON。
+$notes = [IO.File]::ReadAllText((Resolve-Path $notesPath).Path, [Text.UTF8Encoding]::new($false))
 
 # ---- 2) Verify repo access ------------------------------------------------------
 try {
@@ -131,9 +137,34 @@ try {
     Write-Host "目标仓库: $($repoInfo.full_name)  默认分支: $($repoInfo.default_branch)"
 } catch {
     Write-Host "访问仓库失败：$($_.Exception.Message)" -ForegroundColor Red
-    Write-Host "请检查 token 是否有效、是否有 repo 权限。"
+    Write-Host "请检查 token 是否有效。"
     exit 1
 }
+
+# ---- 2b) Verify WRITE access ----------------------------------------------------
+#
+# 必须单独验一次写权限。
+# 读能成功不代表能写：GitHub 对「token 有效但权限不足」的**写**操作返回
+# 404（不是 403），看起来像「仓库不存在」，很容易误判成脚本地址写错了。
+# 这里用 PATCH 把仓库描述设成原值（不改动实际内容）来探测。
+try {
+    Invoke-Api -Method PATCH -Uri $api -Body @{ description = [string]$repoInfo.description } | Out-Null
+} catch {
+    $code = $null
+    if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
+    Write-Host "token 没有写入权限（HTTP $code）。" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "创建 Release 需要写权限。请换一个 token："
+    Write-Host "  classic token : 勾选 repo 这一个 scope 即可"
+    Write-Host "                  https://github.com/settings/tokens"
+    Write-Host "  fine-grained  : 在 Repository permissions 里把"
+    Write-Host "                  Contents 设为 Read and write"
+    Write-Host "                  （只给 Metadata: Read 是不够的）"
+    Write-Host ""
+    Write-Host "创建页面：https://github.com/settings/tokens"
+    exit 1
+}
+Write-Host "写入权限: OK"
 
 # ---- 3) Delete the stale release ------------------------------------------------
 if (-not $KeepOldRelease) {
