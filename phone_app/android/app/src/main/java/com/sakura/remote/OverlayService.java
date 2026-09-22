@@ -147,7 +147,6 @@ public class OverlayService extends Service {
     private int expandedY;
 
     /** 完整窗口的页面地址（不含 mode 参数）。 */
-    private String basePageUrl = "";
 
     private final Runnable refreshTask = new Runnable() {
         @Override
@@ -211,7 +210,6 @@ public class OverlayService extends Service {
             if (!pendingUrl.isEmpty() && petWindow != null) {
                 final String url = withMode(pendingUrl, "overlay");
                 pendingUrl = "";
-                basePageUrl = "";
                 handler.post(() -> petWindow.load(url));
             }
         }
@@ -336,18 +334,34 @@ public class OverlayService extends Service {
             url = buildOverlayUrl();
         }
         pendingUrl = "";
-        petWindow.load(url);
+        // 必须在这里补上 mode=overlay。
+        //
+        // pendingUrl 是「基础页面地址」（PetConfig.chatUrl，形如 .../?token=xxx），
+        // 不带 mode 参数。原来这里直接 petWindow.load(url) —— 于是**首次创建窗口**
+        // 时加载的是不带 mode 的基础页面：网页看到 mode 不是 overlay，
+        // 就不会给 body 加 overlay-mode，结果 #stage / #portraitWrap 被判成
+        // 「App 内模式」而 display:none。
+        // 表现就是：窗口尺寸对的，但里面空空的 —— 立绘不显示，只剩一块
+        // 半透明方框。窗口已存在时的切换路径（onStartCommand）本来就加了 mode，
+        // 所以只有「首次开启桌面立绘」会踩到，很容易漏。
+        petWindow.load(withMode(url, "overlay"));
         return true;
+    }
+
+    /**
+     * 插件页面的「基础地址」：不含 mode 参数。
+     *
+     * 用它作为切换悬浮窗/小球模式的基准 —— {@link #withMode} 会先去掉旧的
+     * mode 再附加新的，所以拿裸地址或带 mode 的地址都能正确工作。
+     * 统一走这里，避免再出现「某条路径忘了带 mode」的问题。
+     */
+    private String overlayBaseUrl() {
+        return PetConfig.chatUrl(this);
     }
 
     /** 悬浮窗默认加载插件页面的 overlay 模式。 */
     private String buildOverlayUrl() {
-        String chat = PetConfig.chatUrl(this);
-        if (chat.isEmpty()) {
-            return "";
-        }
-        String separator = chat.contains("?") ? "&" : "?";
-        return chat + separator + "mode=overlay";
+        return withMode(overlayBaseUrl(), "overlay");
     }
 
     private void applyWindowSize() {
@@ -399,10 +413,7 @@ public class OverlayService extends Service {
             expandedY = layoutParams.y;
             layoutParams.width = bubbleSize;
             layoutParams.height = bubbleSize;
-            if (basePageUrl.isEmpty()) {
-                basePageUrl = buildOverlayUrl();
-            }
-            petWindow.load(withMode(basePageUrl, "bubble"));
+            petWindow.load(withMode(overlayBaseUrl(), "bubble"));
         } else {
             layoutParams.width = expandedWidth > 0
                     ? expandedWidth : Math.max(dp(220), Math.round(screenWidth * windowWidthRatio));
@@ -410,7 +421,7 @@ public class OverlayService extends Service {
                     ? expandedHeight : Math.round(layoutParams.width * windowHeightRatio);
             layoutParams.x = expandedX;
             layoutParams.y = expandedY;
-            petWindow.load(withMode(basePageUrl.isEmpty() ? buildOverlayUrl() : basePageUrl, "overlay"));
+            petWindow.load(withMode(overlayBaseUrl(), "overlay"));
         }
         updateLayout();
     }
