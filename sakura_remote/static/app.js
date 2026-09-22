@@ -2031,11 +2031,14 @@ function addBubble(role, text, options = {}) {
   }
   trimBubbles();
   scrollBubbles();
-  if (isOverlayPage()) {
-    syncMessageNav();
-    // 有新内容就把对话框显示出来并重新计时（说完一段时间后才收起）
-    scheduleBubbleAutoHide();
-  }
+  // 两种模式都要同步：
+  //   - 悬浮窗：切换「当前显示这一条」
+  //   - App：显示/隐藏翻阅按钮并更新它的可用状态
+  // 原来只在悬浮窗模式调用，导致 #msgNav 的 .hidden 类在 App 内永远不会被移除，
+  // 翻阅按钮一直藏着（实测有 16 条历史也没有按钮）。
+  syncMessageNav();
+  // 有新内容就把对话框显示出来并重新计时（说完一段时间后才收起）
+  scheduleBubbleAutoHide();
   return { row: row, bubble: bubble };
 }
 
@@ -2100,12 +2103,22 @@ function syncMessageNav(showLatest = true) {
 }
 
 function applyMessageNav(options = {}) {
-  if (!isOverlayPage()) return;
   const rows = Array.from(el.bubbles.querySelectorAll('.bubbleRow'));
+  const total = rows.length;
+
+  // ---- App 内：完整历史 + 翻阅 ----
+  // 不隐藏任何气泡，只维护「当前定位到第几条」，由 stepMessage 滚动过去。
+  // 翻阅按钮仍然显示，方便快速跳到上一条/下一条（历史很长时很实用）。
+  if (!isOverlayPage()) {
+    if (el.msgNav) el.msgNav.classList.toggle('hidden', total === 0);
+    if (el.msgPrev) el.msgPrev.disabled = state.messageIndex <= 0;
+    if (el.msgNext) el.msgNext.disabled = state.messageIndex >= total - 1;
+    return;
+  }
+
   rows.forEach((row, index) => {
     row.classList.toggle('current', index === state.messageIndex);
   });
-  const total = rows.length;
   if (el.msgNav) {
     el.msgNav.classList.toggle('hidden', total === 0);
   }
@@ -2166,8 +2179,27 @@ function stepMessage(delta) {
   if (next === state.messageIndex) return;
   state.messageIndex = next;
   applyMessageNav();
+  // App 内不切换可见性，改为把这一条滚进视野并短暂高亮，
+  // 否则按了翻页按钮画面没有任何变化，用户会以为坏了。
+  if (!isOverlayPage()) {
+    scrollToMessage(rows[next]);
+  }
   // 翻页后重新计时，别刚翻到就自动消失
   scheduleBubbleAutoHide();
+}
+
+/** App 内翻阅：把指定气泡滚到视野中并短暂高亮。 */
+function scrollToMessage(row) {
+  if (!row) return;
+  try {
+    row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  } catch (error) {
+    // 老 WebView 不支持 options，退回直接定位
+    row.scrollIntoView();
+  }
+  row.classList.add('navHit');
+  clearTimeout(scrollToMessage._timer);
+  scrollToMessage._timer = setTimeout(() => row.classList.remove('navHit'), 900);
 }
 
 /* ---------- 语音解锁提示：只出现一次 ----------
@@ -2265,6 +2297,9 @@ function showBubble() {
  * 所以先用 rAF 让类名生效（补位立刻可见），再等过渡结束补一次精确重算。
  */
 function refreshBubbleLayout() {
+  // 重排只服务悬浮窗（窗口尺寸 = 立绘 + 对话框 + 输入栏）。
+  // App 内布局是满屏的，卡片显隐不影响窗口，跳过可省掉一次无谓的 DOM 测量。
+  if (!isOverlayPage()) return;
   const apply = () => {
     if (typeof relayoutOverlay === 'function') relayoutOverlay();
   };

@@ -42,12 +42,38 @@ function makeNode(tag) {
       };
       return walk(this);
     },
+    // syncMessageNav 用 querySelectorAll('.bubbleRow') 数历史条数。
+    // 以前只在悬浮窗模式调用，桩里就没实现；现在两种模式都调，必须补上。
+    querySelectorAll(selector) {
+      const wanted = selector.replace(/^\./, '');
+      const out = [];
+      const walk = (item) => {
+        for (const child of item.children) {
+          if (child.className && child.className.split(' ').includes(wanted)) out.push(child);
+          walk(child);
+        }
+      };
+      walk(this);
+      return out;
+    },
   };
   return node;
 }
 
 const bubblesRoot = makeNode('section');
-const el = { bubbles: bubblesRoot };
+// addBubble 现在两种模式都会调 syncMessageNav（App 里也要更新翻阅按钮状态），
+// 所以桩里必须提供这些节点和查询方法：
+//   el.bubbles.querySelectorAll  -> syncMessageNav 数气泡用
+//   el.msgNav / el.msgPrev / el.msgNext -> 更新隐藏类与按钮可用状态
+const msgNav = makeNode('div');
+const msgPrev = makeNode('button');
+const msgNext = makeNode('button');
+const el = {
+  bubbles: bubblesRoot,
+  msgNav: msgNav,
+  msgPrev: msgPrev,
+  msgNext: msgNext,
+};
 let scrollCalls = 0;
 
 const snippet = source.slice(start, end);
@@ -56,14 +82,23 @@ const fn = new Function(
   'scrollBubbles',
   'trimBubbles',
   'document',
+  'scheduleBubbleAutoHide',
+  'isOverlayPage',
+  'state',
   snippet + '\nreturn addBubble;'
 );
+
+// syncMessageNav 会读写 state.messageCount / messageIndex，桩里给一份最小实现
+const state = { messageCount: 0, messageIndex: 0 };
 
 const addBubble = fn(
   el,
   () => { scrollCalls += 1; },
   () => {},
-  { createElement: makeNode }
+  { createElement: makeNode },
+  () => {},
+  () => true,
+  state
 );
 
 const failures = [];

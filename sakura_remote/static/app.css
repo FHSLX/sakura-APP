@@ -1263,6 +1263,145 @@ body.show-original-fallback .textOriginal {
 
 #bubbles::-webkit-scrollbar { display: none; }
 
+/* ============================================================
+ * APP 内：只保留对话历史（去掉立绘）
+ *
+ * 与悬浮窗的分工：
+ *   - 手机桌面立绘（悬浮窗）= 看角色，一次只显示一条气泡
+ *   - App = 看对话历史，左侧角色、右侧自己，可翻阅
+ * 两者共用同一份 HTML，所以用 :not(.overlay-mode) 区分。
+ * ============================================================ */
+
+/* 立绘和相关装饰全部去掉 */
+body:not(.overlay-mode) #stage,
+body:not(.overlay-mode) #backdrop,
+body:not(.overlay-mode) #portraitWrap,
+body:not(.overlay-mode) #portraitShade,
+body:not(.overlay-mode) #hint,
+body:not(.overlay-mode) #miniBar {
+  display: none;
+}
+
+/*
+ * 历史列表占满整屏并自己滚动。
+ *
+ * 原来 #bubbles 是 fixed + max-height: 52vh（为了不盖住立绘的脸），
+ * 去掉立绘之后那 52vh 就成了浪费，历史只能显示一小半。
+ * 改成撑满到输入栏上方。position 仍用 fixed，但 top 顶到导航栏下沿。
+ */
+body:not(.overlay-mode) #bubbles {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: calc(env(safe-area-inset-top, 0px) + 62px);   /* 顶栏高度 */
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 78px); /* 输入栏高度 */
+  max-height: none;
+  margin: 0 auto;
+  max-width: 900px;   /* 大屏上不要拉成一条超长行 */
+  padding: 10px 14px 16px;
+  mask-image: none;   /* 顶部不再需要渐隐，历史从第一条开始就是内容 */
+  /* 气泡的 max-width 是在容器宽度上算的；容器一旦因 padding / 滚动条
+     略微收窄，右对齐的那条就会溢出被裁。明确禁止横向溢出，
+     保证「自己发的」永远完整可见。 */
+  overflow-x: hidden;
+  box-sizing: border-box;
+}
+
+/*
+ * 翻阅按钮：基础规则里 #msgNav 是 display:none（原本只在悬浮窗用），
+ * App 内要显式打开，否则历史再长也没法快速跳转。
+ * 做成贴在历史区右下角的浮动按钮，不占历史高度。
+ */
+body:not(.overlay-mode) #msgNav {
+  display: flex;
+  position: fixed;
+  /* 贴气泡容器的右边缘：容器居中且最宽 900px。
+     写成 calc(50% - 450px + …) 是反的 —— 那样在窄屏会算成负数外的位置，
+     按钮直接跑出屏幕（实测在 430 宽的屏上完全看不见）。 */
+  right: max(14px, calc(50% - 450px + 14px));
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 86px);
+  z-index: 6;
+  width: auto;
+  max-width: none;
+  height: auto;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* App 内只留两个圆形按钮，隐藏中间的文字卡片 */
+body:not(.overlay-mode) #msgText { display: none; }
+body:not(.overlay-mode) #msgNav.hidden { display: none; }
+
+body:not(.overlay-mode) #msgButtons {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+body:not(.overlay-mode) #msgButtons button {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  background: color-mix(in srgb, var(--input-bg) 94%, transparent);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 3px 10px rgba(120, 60, 95, 0.16);
+  color: var(--secondary-text);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+body:not(.overlay-mode) #msgButtons button:disabled { opacity: 0.35; }
+body:not(.overlay-mode) #msgButtons button:active { transform: scale(0.94); }
+
+/*
+ * App 内「自动隐藏」只是淡出翻阅按钮，不折叠高度。
+ *
+ * 悬浮窗那条规则会把高度收为 0（为了让立绘补位），
+ * 但 App 里按钮是浮动定位的，收高度会让它直接消失、看起来像坏了。
+ * 这里只做淡出 + 不可点。
+ */
+body:not(.overlay-mode) #msgNav.auto-hidden {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 260ms ease;
+  height: auto;
+  max-height: none;
+  padding: 0;
+  transform: none;
+}
+
+/* 历史里每条气泡都要有呼吸感，且不吃掉 80% 宽度的上限太多 */
+body:not(.overlay-mode) .bubble {
+  max-width: min(78%, 560px);
+}
+
+/* 翻阅定位到某条时的短暂高亮：让用户看得出「跳到这条了」 */
+body:not(.overlay-mode) .bubbleRow.navHit .bubble {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent),
+              0 6px 18px rgba(120, 60, 95, 0.14);
+}
+
+/* 大屏（平板 / 折叠屏展开）时给历史区更舒服的宽度与字号 */
+@media (min-width: 760px) {
+  body:not(.overlay-mode) #bubbles {
+    max-width: 980px;
+    padding: 14px 24px 20px;
+  }
+  body:not(.overlay-mode) .bubble {
+    font-size: 16px;
+    max-width: min(76%, 640px);
+  }
+}
+
+
 .bubbleRow { display: flex; animation: rise 260ms ease both; }
 .bubbleRow.user { justify-content: flex-end; }
 
