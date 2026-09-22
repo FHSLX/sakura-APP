@@ -222,8 +222,42 @@ function applyPortraitOffset(value, options = {}) {
   const portraitEl = el.portrait;
   const height = portraitEl ? portraitEl.getBoundingClientRect().height : 0;
   // 正值往上：CSS 里立绘贴近下方对话框，所以往上要减小 Y
-  const offsetPx = height > 0 ? Math.round(-height * percent / 100) : null;
+  let offsetPx = height > 0 ? Math.round(-height * percent / 100) : null;
+  /*
+   * 夹取：不允许把立绘推出 stage。
+   *
+   * 立绘底部贴着输入栏（输入栏现在是正常流元素，不再是 fixed），
+   * 所以**任何向上平移都会直接切掉头顶**。
+   *
+   * 为什么会这样：戴锦时的缩放（--pet-scale）作用在 #portraitWrap 上，
+   * 而布局高度仍是 stage 的 100% —— 也就是说缩小时图片在布局上并没有变小，
+   * 上移多少就裁掉多少。滑块范围 ±50% 换算过来是 ±130px，远超可用空间。
+   * 实测：portraitY=35 → 上移 91px → 立绘顶部到 -11px，头被切掉。
+   *
+   * 位置的安全范围就是「容器高 - 图片布局高」：
+   *   - 上界 0：底部对齐，不能再低
+   *   - 下界 = -(容器高 - 图片高)：顶部对齐，再往上就切头
+   * 夹住的只是**实际位移**，不改用户设的百分比 ——
+   * 这样把缩放改大之后，原先那个百分比会自动重新变得可用。
+   */
   const target = el.portraitWrap || portraitEl;
+  if (offsetPx !== null && target) {
+    const containerH = target.clientHeight || 0;
+    /*
+     * 「图片高度」要用**缩放后的可视高度**（getBoundingClientRect），
+     * 不能用 offsetHeight —— 两者差在 --pet-scale 上。
+     *
+     * --pet-scale 作用在 #portraitWrap 的 transform 上，布局高度仍是 stage 的 100%：
+     *   - offsetHeight = 321（等于容器高）→ 可用位移算出来是 0，
+     *     滑块会彻底失效（实测所有档位位移都是 0，等于把这个功能弄没了）；
+     *   - getBoundingClientRect = 259（缩到 0.807 后的真实高度）
+     *     → 可用位移 = 321 - 259 = 62px，滑块有正常的活动范围。
+     * 用户看到、能被裁掉的是后者，所以按后者算才对。
+     */
+    const visualH = portraitEl ? portraitEl.getBoundingClientRect().height : height;
+    const minOffset = -Math.max(0, containerH - visualH);
+    offsetPx = Math.max(minOffset, Math.min(0, offsetPx));
+  }
   if (target && offsetPx !== null) {
     target.style.setProperty('--pet-pan-y', offsetPx + 'px');
     state.portraitOffsetPx = offsetPx;
