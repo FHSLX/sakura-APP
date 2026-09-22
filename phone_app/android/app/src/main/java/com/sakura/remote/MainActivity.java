@@ -195,6 +195,7 @@ public class MainActivity extends BridgeActivity implements RemoteBridge.Host {
             return;
         }
         if (OverlayService.isRunning()) {
+            // 悬浮窗已经在跑，说明用户是从桌宠点回来的，不要重复启动
             return;
         }
         Intent service = new Intent(this, OverlayService.class);
@@ -206,6 +207,19 @@ public class MainActivity extends BridgeActivity implements RemoteBridge.Host {
             }
         } catch (Exception ignored) {
             // 启动失败就让用户手动点开关
+            return;
+        }
+        // 关键：必须把自己收到后台。
+        //
+        // 漏了这一步会出现「App 和悬浮窗同时显示、画面叠在一起」——
+        // 实测截图里能看到两套对话框和两个输入栏。
+        // 悬浮窗是独立窗口，盖在 App 的 Activity 之上，两者都可见就是重影。
+        // 延后一点再收，否则前台服务刚起来时被切后台可能影响它启动。
+        final WebView view = getBridge() != null ? getBridge().getWebView() : null;
+        if (view != null) {
+            view.postDelayed(() -> moveTaskToBack(true), 800);
+        } else {
+            moveTaskToBack(true);
         }
     }
 
@@ -472,6 +486,20 @@ public class MainActivity extends BridgeActivity implements RemoteBridge.Host {
                 ScreenCapturer.captureWithGrant(this, data, this::deliverScreenshot);
             } else {
                 deliverScreenshot("", "你取消了截图授权");
+            }
+            // 悬浮窗模式下截屏授权是「借」MainActivity 走个流程，用完必须让位。
+            //
+            // 不收回后台的话：MainActivity 会一直停在前台盖住悬浮窗 ——
+            // 用户看到的是 App 界面而不是桌宠，而且和悬浮窗叠成重影。
+            // 授权结果已经交给 CaptureService，可以安全退出。
+            if (OverlayService.isRunning()) {
+                final WebView view = getBridge() != null ? getBridge().getWebView() : null;
+                if (view != null) {
+                    // 等回调把结果交给网页后再退，退太早可能丢掉这一拍
+                    view.postDelayed(() -> moveTaskToBack(true), 600);
+                } else {
+                    moveTaskToBack(true);
+                }
             }
             return;
         }
