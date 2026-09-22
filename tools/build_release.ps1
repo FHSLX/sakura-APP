@@ -127,8 +127,21 @@ if ($hits.Count -gt 0) {
 Write-Host "Privacy scan passed (no LAN IPs, absolute paths, tokens, or placeholders)" -ForegroundColor Green
 
 # 5) Package.
+#
+# 版本号从 plugin.yaml 读，不再写死 —— 之前写死成 1.0.0，
+# 升版本时很容易漏改，产出的包名和实际版本对不上。
+$pluginVersion = "0.0.0"
+$yamlPath = Join-Path $root "sakura_remote\plugin.yaml"
+if (Test-Path $yamlPath) {
+    $versionLine = Select-String -Path $yamlPath -Pattern '^version:\s*(.+)$' | Select-Object -First 1
+    if ($versionLine) {
+        $pluginVersion = $versionLine.Matches[0].Groups[1].Value.Trim().Trim('"').Trim("'")
+    }
+}
+Write-Host "Plugin version: $pluginVersion"
+
 Compress-Archive -Path (Join-Path $out "plugin\*") `
-    -DestinationPath (Join-Path $out "plugin-sakura.remote-1.0.0.zip") -Force
+    -DestinationPath (Join-Path $out "plugin-sakura.remote-$pluginVersion.zip") -Force
 Compress-Archive -Path (Join-Path $out "SakuraRemote-release.apk") `
     -DestinationPath (Join-Path $out "App-SakuraRemote.zip") -Force
 

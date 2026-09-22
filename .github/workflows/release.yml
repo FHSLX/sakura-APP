@@ -3,12 +3,12 @@ name: Release
 # 打一个 v* 标签就自动构建并发布，不需要本地环境。
 #
 # 用法：
-#   git tag -a v1.0.0 -m "首个版本"
-#   git push origin v1.0.0
+#   git tag -a v1.1.0 -m "版本说明"
+#   git push origin v1.1.0
 #
 # 产物：
 #   SakuraRemote-release.apk      手机 App
-#   plugin-sakura.remote-1.0.0.zip  Sakura 插件
+#   plugin-sakura.remote-<version>.zip  Sakura 插件
 #   MANUAL.md                      使用手册
 
 on:
