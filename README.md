@@ -429,7 +429,7 @@ sakura.host.mobile  →  电脑端对话模型（含长期记忆）
 - **Android 14 起 MediaProjection 必须跑在 `mediaProjection` 类型的前台服务里**，
   在 Activity 回调里直接建 VirtualDisplay 会失败。见 [phone_app/README.md](phone_app/README.md)
 - **`screen.width` 和 `window.innerWidth` 不是一回事**：悬浮窗的实际视口可能比屏幕窄
-  （实测屏幕 393 而窗口 319），混用会把控件挤出屏幕。见 [sakura_remote/README.md](sakura_remote/README.md)
+  （实测屏幕 393 而窗口 319），混用会把控件挤出屏幕。见 [PLUGIN.md](PLUGIN.md)
 
 ---
 

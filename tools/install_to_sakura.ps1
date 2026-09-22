@@ -1,8 +1,8 @@
-# Install the sakura_remote plugin into a Sakura installation.
+﻿# Install the sakura_remote plugin into a Sakura installation.
 #
 # Usage (run from the repository root):
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools\install_to_sakura.ps1
-#   powershell -NoProfile -ExecutionPolicy Bypass -File tools\install_to_sakura.ps1 -SakuraRoot "D:\Sakura"
+#   powershell -NoProfile -ExecutionPolicy Bypass -File tools\install_to_sakura.ps1 -SakuraRoot "F:\sakura"
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools\install_to_sakura.ps1 -Disable
 #
 # Layout it produces (two DIFFERENT folders on purpose):
@@ -17,7 +17,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$SakuraRoot = "",   # Sakura 安装目录；留空则自动探测常见位置
+    [string]$SakuraRoot = "F:\sakura",
     [string]$PluginId = "sakura.remote",
     [switch]$Disable,
     [switch]$Force
@@ -26,9 +26,20 @@ param(
 $ErrorActionPreference = "Stop"
 
 $repo = Split-Path -Parent $PSScriptRoot
-$source = Join-Path $repo "sakura_remote"
-if (-not (Test-Path $source)) {
-    throw "Plugin source folder not found: $source"
+
+# 插件源码可能有两种布局：
+#   - Registry 投稿要求 plugin.yaml 在**仓库根目录**（当前布局）
+#   - 早期在 sakura_remote/ 子目录下
+# 两个都认，省得改了布局就装不上。
+$source = ""
+foreach ($candidate in @($repo, (Join-Path $repo "sakura_remote"))) {
+    if (Test-Path (Join-Path $candidate "plugin.yaml")) {
+        $source = $candidate
+        break
+    }
+}
+if (-not $source) {
+    throw "Plugin source not found (no plugin.yaml in $repo or $repo\sakura_remote)"
 }
 if (-not (Test-Path (Join-Path $SakuraRoot "sakura.exe"))) {
     Write-Warning "sakura.exe not found under $SakuraRoot - please check -SakuraRoot."

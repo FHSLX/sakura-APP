@@ -4,8 +4,16 @@
 
 const fs = require('fs');
 const path = require('path');
+// Registry 投稿要求 plugin.yaml 在仓库根目录，早期在 sakura_remote/ 子目录。
+// 两种布局都认，避免改了布局测试就跑不起来。
+const fs0 = require('fs');
+const _root = path.join(__dirname, '..');
+const PLUGIN_ROOT = fs0.existsSync(path.join(_root, 'plugin.yaml'))
+  ? _root
+  : path.join(_root, 'sakura_remote');
 
-const source = fs.readFileSync(path.join(__dirname, '..', 'sakura_remote', 'static', 'app.js'), 'utf8');
+
+const source = fs.readFileSync(path.join(PLUGIN_ROOT, 'static', 'app.js'), 'utf8');
 
 // 只截取匹配算法部分，避免执行依赖 DOM 的代码。
 const tokensStart = source.indexOf('const TONE_STOPWORDS');

@@ -22,7 +22,18 @@ import wave
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PLUGIN_ROOT = ROOT / "sakura_remote"
+
+def _plugin_root():
+    """插件源码目录。
+
+    Registry 投稿要求 plugin.yaml 在仓库根目录，
+    早期在 sakura_remote/ 子目录，两种都认。"""
+    for candidate in (ROOT, ROOT / "sakura_remote"):
+        if (candidate / "plugin.yaml").exists():
+            return candidate
+    raise SystemExit("plugin.yaml not found under " + str(ROOT))
+
+PLUGIN_ROOT = _plugin_root()
 sys.path.insert(0, str(PLUGIN_ROOT))
 
 TOKEN = "runtime-token"

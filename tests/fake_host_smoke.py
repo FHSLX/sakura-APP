@@ -22,7 +22,18 @@ import wave
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "sakura_remote"))
+
+def _plugin_root():
+    """插件源码目录。
+
+    Registry 投稿要求 plugin.yaml 在仓库根目录，
+    早期在 sakura_remote/ 子目录，两种都认。"""
+    for candidate in (ROOT, ROOT / "sakura_remote"):
+        if (candidate / "plugin.yaml").exists():
+            return candidate
+    raise SystemExit("plugin.yaml not found under " + str(ROOT))
+
+sys.path.insert(0, str(_plugin_root()))
 
 import http_server  # noqa: E402
 

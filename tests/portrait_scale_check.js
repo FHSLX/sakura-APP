@@ -9,9 +9,16 @@
 
 const fs = require('fs');
 const path = require('path');
+// Registry 投稿要求 plugin.yaml 在仓库根目录，早期在 sakura_remote/ 子目录。
+// 两种布局都认，避免改了布局测试就跑不起来。
+const fs0 = require('fs');
+const _root = path.join(__dirname, '..');
+const PLUGIN_ROOT = fs0.existsSync(path.join(_root, 'plugin.yaml'))
+  ? _root
+  : path.join(_root, 'sakura_remote');
 
-const source = fs.readFileSync(
-  path.join(__dirname, '..', 'sakura_remote', 'static', 'app.js'), 'utf8');
+
+const source = fs.readFileSync(path.join(PLUGIN_ROOT, 'static', 'app.js'), 'utf8');
 
 // 只截取缩放相关的三个函数。
 // 注意 nativeBridge 夹在 applyPortraitScale 和 loadPortraitScale 之间，
@@ -127,8 +134,7 @@ api.loadPortraitScale();
 check('无本地值时读原生缩放', state.portraitScale === 1.25, state.portraitScale);
 
 // 6) CSS 必须让缩放落在外层容器，且动画只在内层 img 上
-const css = fs.readFileSync(
-  path.join(__dirname, '..', 'sakura_remote', 'static', 'app.css'), 'utf8');
+const css = fs.readFileSync(path.join(PLUGIN_ROOT, 'static', 'app.css'), 'utf8');
 function ruleFor(selector) {
   const match = css.match(new RegExp(selector.replace(/[.#]/g, '\\$&') + '\\s*\\{([^}]*)\\}'));
   return match ? match[1] : '';

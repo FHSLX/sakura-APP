@@ -4,8 +4,16 @@
 
 const fs = require('fs');
 const path = require('path');
+// Registry 投稿要求 plugin.yaml 在仓库根目录，早期在 sakura_remote/ 子目录。
+// 两种布局都认，避免改了布局测试就跑不起来。
+const fs0 = require('fs');
+const _root = path.join(__dirname, '..');
+const PLUGIN_ROOT = fs0.existsSync(path.join(_root, 'plugin.yaml'))
+  ? _root
+  : path.join(_root, 'sakura_remote');
 
-const source = fs.readFileSync(path.join(__dirname, '..', 'sakura_remote', 'static', 'app.js'), 'utf8');
+
+const source = fs.readFileSync(path.join(PLUGIN_ROOT, 'static', 'app.js'), 'utf8');
 
 const start = source.indexOf('function addBubble');
 const end = source.indexOf('function trimBubbles');
@@ -115,8 +123,7 @@ check('双行：生成 .textOriginal', !!original && original.textContent === '�
 check('双行：生成 .textTranslation', !!translation && translation.textContent === '在的哦。', translation && translation.textContent);
 
 // 2) 中文是主体：译文要排在原文前面，且 CSS 里字号更大
-const rawCss = fs.readFileSync(
-  path.join(__dirname, '..', 'sakura_remote', 'static', 'app.css'), 'utf8');
+const rawCss = fs.readFileSync(path.join(PLUGIN_ROOT, 'static', 'app.css'), 'utf8');
 const css = rawCss.replace(/\/\*[\s\S]*?\*\//g, '');
 
 // 注意匹配的必须是「规则体的开头」，避免误命中
@@ -156,8 +163,7 @@ check('hide-original 时隐藏日文',
 const formBody = ruleBody('#form');
 const columnCount = (formBody.match(/grid-template-columns:([^;]+);/) || [])[1] || '';
 const declaredColumns = columnCount.trim().split(/\s+/).filter(Boolean).length;
-const html = fs.readFileSync(
-  path.join(__dirname, '..', 'sakura_remote', 'web_ui.py'), 'utf8');
+const html = fs.readFileSync(path.join(PLUGIN_ROOT, 'web_ui.py'), 'utf8');
 const formMatch = html.match(/<form id="form">([\s\S]*?)<\/form>/);
 const formInner = formMatch ? formMatch[1] : '';
 const layoutInner = formInner

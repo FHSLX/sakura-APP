@@ -1,4 +1,4 @@
-﻿# Build a publishable release bundle, excluding private runtime data.
+# Build a publishable release bundle, excluding private runtime data.
 #
 # Why a script: a release bundle must not carry this machine's runtime data
 # (token, logs, caches), and picking files by hand is easy to get wrong.
@@ -15,17 +15,27 @@ param(
     # Optional fixed output directory. Defaults to dist\release-<timestamp>.
     # Useful for rebuilding into the same folder, and for testing the
     # privacy scan itself (put a probe file in, run again, expect failure).
-    [string]$OutDir = ""
+    [string]$OutDir = "",
+
+    # Package the plugin only, skipping the Android APK.
+    # Useful for a quick plugin sanity check on a machine without the Android
+    # SDK, and for the plugin-only bundle the Sakura Registry consumes.
+    [switch]$PluginOnly
 )
 
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
-$pluginSrc = Join-Path $root "sakura_remote"
+# 与 install_to_sakura.ps1 同一套探测：根目录优先，退回 sakura_remote/
+$pluginSrc = ""
+foreach ($candidate in @($root, (Join-Path $root "sakura_remote"))) {
+    if (Test-Path (Join-Path $candidate "plugin.yaml")) { $pluginSrc = $candidate; break }
+}
+if (-not $pluginSrc) { throw "Plugin source not found (no plugin.yaml)" }
 $apk = Join-Path $root "phone_app\android\app\build\outputs\apk\release\app-release.apk"
 
-if (-not (Test-Path $apk)) {
-    throw "APK not found: $apk (run phone_app\build_apk.bat first)"
+if (-not $PluginOnly -and -not (Test-Path $apk)) {
+    throw "APK not found: $apk (run phone_app\build_apk.bat first, or pass -PluginOnly)"
 }
 if (-not (Test-Path $pluginSrc)) {
     throw "Plugin source not found: $pluginSrc"
@@ -41,14 +51,62 @@ $pluginDst = Join-Path $out "plugin\sakura.remote"
 New-Item -ItemType Directory -Force -Path $pluginDst | Out-Null
 
 # 1) Plugin code, minus caches and personal runtime data.
-Copy-Item (Join-Path $pluginSrc "*") $pluginDst -Recurse -Force
-Get-ChildItem $out -Recurse -Directory -Filter "__pycache__" |
+#
+# Use an explicit allow-list, NOT "copy everything and delete the extras".
+#
+# Why: since the Registry requires plugin.yaml at the repository ROOT, the
+# plugin source directory is now the whole repository. A blanket
+# Copy-Item "$pluginSrc\*" therefore drags in phone_app/, docs/, tools/,
+# tests/ AND dist/ -- including the previous build output. That recurses
+# into itself: a single run produced a 987 MB bundle with 77k files and
+# never finished.
+#
+# An allow-list also fails loudly if something expected is missing, instead
+# of silently shipping whatever happens to be lying in the repo.
+$pluginFiles = @(
+    "plugin.yaml",
+    "plugin.py",
+    "http_server.py",
+    "web_ui.py",
+    "config.json",
+    "restart_helper.ps1",
+    "README.md",
+    "PLUGIN.md",
+    "LICENSE"
+)
+$copied = 0
+foreach ($name in $pluginFiles) {
+    $src = Join-Path $pluginSrc $name
+    if (Test-Path $src) {
+        Copy-Item $src (Join-Path $pluginDst $name) -Force
+        $copied++
+    }
+}
+# static/ holds the web UI (app.css / app.js / manifest). Required.
+$staticSrc = Join-Path $pluginSrc "static"
+if (-not (Test-Path $staticSrc)) {
+    throw "static/ not found under $pluginSrc -- the plugin needs it"
+}
+Copy-Item $staticSrc (Join-Path $pluginDst "static") -Recurse -Force
+$copied++
+
+if (-not (Test-Path (Join-Path $pluginDst "plugin.yaml"))) {
+    throw "plugin.yaml missing from the bundle -- refusing to package"
+}
+Write-Host "Packaged $copied plugin entries into plugin\sakura.remote"
+
+# Belt and braces: never ship caches even if one slipped in.
+Get-ChildItem $out -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-Get-ChildItem $out -Recurse -File -Include "*.pyc", "*.pyo" |
+Get-ChildItem $out -Recurse -File -Include "*.pyc", "*.pyo" -ErrorAction SilentlyContinue |
     Remove-Item -Force -ErrorAction SilentlyContinue
 
 # 2) APK.
-Copy-Item $apk (Join-Path $out "SakuraRemote-release.apk") -Force
+if ($PluginOnly) {
+    Write-Host "Plugin-only build: skipping the Android APK."
+} else {
+    Copy-Item $apk (Join-Path $out "SakuraRemote-release.apk") -Force
+}
 
 # 3) Sanitized readme (the checked-in copy, never the working one).
 $readme = Join-Path $PSScriptRoot "release_README.md"
@@ -131,7 +189,7 @@ Write-Host "Privacy scan passed (no LAN IPs, absolute paths, tokens, or placehol
 # 版本号从 plugin.yaml 读，不再写死 —— 之前写死成 1.0.0，
 # 升版本时很容易漏改，产出的包名和实际版本对不上。
 $pluginVersion = "0.0.0"
-$yamlPath = Join-Path $root "sakura_remote\plugin.yaml"
+$yamlPath = Join-Path $pluginSrc "plugin.yaml"
 if (Test-Path $yamlPath) {
     $versionLine = Select-String -Path $yamlPath -Pattern '^version:\s*(.+)$' | Select-Object -First 1
     if ($versionLine) {
@@ -142,8 +200,12 @@ Write-Host "Plugin version: $pluginVersion"
 
 Compress-Archive -Path (Join-Path $out "plugin\*") `
     -DestinationPath (Join-Path $out "plugin-sakura.remote-$pluginVersion.zip") -Force
-Compress-Archive -Path (Join-Path $out "SakuraRemote-release.apk") `
-    -DestinationPath (Join-Path $out "App-SakuraRemote.zip") -Force
+if ($PluginOnly) {
+    # No APK in a plugin-only build, so skip the zip that only wraps it.
+} else {
+    Compress-Archive -Path (Join-Path $out "SakuraRemote-release.apk") `
+        -DestinationPath (Join-Path $out "App-SakuraRemote.zip") -Force
+}
 
 Write-Host ""
 Write-Host "Release bundle: $out"
