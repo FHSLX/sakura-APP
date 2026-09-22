@@ -512,35 +512,19 @@ function installOverlayGestures() {
     }, HOLD_MS);
   }, { passive: true });
 
-  // ---- 拖动：每帧只跨进程调用一次 ----
+  // ---- 拖动：立即下发，不再等下一帧 ----
   //
-  // moveBy 会走到 WindowManager.updateViewLayout，是一次跨进程的窗口重排，
-  // 开销不小。而 touchmove 在 120Hz 屏上每秒能触发上百次 —— 每次都调就会
-  // 「拖不动/跟不上手」。这里把一帧内的增量累积起来，用 rAF 合并成一次调用。
-  let pendingDx = 0;
-  let pendingDy = 0;
-  let moveScheduled = false;
-
-  function flushMove() {
-    moveScheduled = false;
-    if (!pendingDx && !pendingDy) return;
-    const dx = pendingDx;
-    const dy = pendingDy;
-    pendingDx = 0;
-    pendingDy = 0;
-    move(dx, dy);
-  }
-
+  // 原来是把一帧内的增量累积起来，用 rAF 合并成一次 moveBy 调用。
+  // 那个做法在「touchmove 触发频率远高于屏幕刷新率」时才划算，
+  // 但代价是**必然多一帧延迟**：touchmove → rAF 回调 → 跨进程 → updateViewLayout，
+  // 手感上就是「不跟手」「发飘」。
+  //
+  // 实测 native.moveBy 单次只要 0.76ms（30 次共 23ms），而且 touchmove 本身
+  // 就是按屏幕刷新率来的，没有合并的必要。所以改成直接下发，
+  // 少掉一帧的等待；同时拖动期间用 body.dragging 关掉滤镜与过渡（见 app.css）。
   function queueMove(dx, dy) {
-    pendingDx += dx;
-    pendingDy += dy;
-    if (moveScheduled) return;
-    moveScheduled = true;
-    if (typeof requestAnimationFrame === 'function') {
-      requestAnimationFrame(flushMove);
-    } else {
-      setTimeout(flushMove, 16);
-    }
+    // 直接走，不再攒帧
+    move(dx, dy);
   }
 
   target.addEventListener('touchmove', (event) => {
@@ -553,6 +537,8 @@ function installOverlayGestures() {
       if (moved < DRAG_THRESHOLD) return;
       dragging = true;
       clearHold();          // 开始拖动就不再触发开设置
+      // 拖动期间关掉滤镜与过渡（见 app.css 的 body.dragging）
+      document.body.classList.add('dragging');
     }
     lastX = touch.clientX;
     lastY = touch.clientY;
@@ -572,9 +558,9 @@ function installOverlayGestures() {
     const isTap = !cancelled && !dragging && holdTimer && !longPressed;
     holding = false;
     dragging = false;
+    document.body.classList.remove('dragging');
     clearHold();
-    // 松手时把还没发出的位移补上，否则最后一点距离会丢
-    flushMove();
+    // 位移已经逐次直接下发了，这里不需要再补发
     if (isTap) toggleBubbleByTap();
   };
   target.addEventListener('touchend', () => end(false), { passive: true });
@@ -1316,33 +1302,17 @@ function installBubbleGestures(target) {
   let holdTimer = 0;
   let startX = 0;
   let startY = 0;
-  let pendingDx = 0;
-  let pendingDy = 0;
-  let moveScheduled = false;
-
   function moveNative(dx, dy) {
     if (native && typeof native.moveBy === 'function') {
       try { native.moveBy(dx, dy); } catch (error) { /* 忽略 */ }
     }
   }
 
-  function flushMove() {
-    moveScheduled = false;
-    if (!pendingDx && !pendingDy) return;
-    const dx = pendingDx;
-    const dy = pendingDy;
-    pendingDx = 0;
-    pendingDy = 0;
-    moveNative(dx, dy);
-  }
-
   function queueMove(dx, dy) {
-    pendingDx += dx;
-    pendingDy += dy;
-    if (moveScheduled) return;
-    moveScheduled = true;
-    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(flushMove);
-    else setTimeout(flushMove, 16);
+    // 和悬浮窗一样直接下发：moveBy 实测单次仅 0.76ms，
+    // 攒帧只会平白多一帧延迟（手感就是「不跟手」）。
+    // 注意这里要用 moveNative —— 小球这段作用域里没有 move()。
+    moveNative(dx, dy);
   }
 
   function restore() {
@@ -1371,6 +1341,7 @@ function installBubbleGestures(target) {
     if (!dragging) {
       if (moved < DRAG_THRESHOLD) return;
       dragging = true;
+      document.body.classList.add('dragging');
       clearTimeout(holdTimer);   // 开始拖动就不叫设置了
     }
     lastX = x; lastY = y;
@@ -1382,8 +1353,9 @@ function installBubbleGestures(target) {
     const wasHolding = holding;
     holding = false;
     dragging = false;
+    document.body.classList.remove('dragging');
     clearTimeout(holdTimer);
-    flushMove();
+    // 位移已经逐次直接下发了，这里不需要再补发
     // 没拖动、也没长按触发设置 → 视为轻点，恢复完整窗口
     if (wasHolding && !wasDragging) restore();
   }

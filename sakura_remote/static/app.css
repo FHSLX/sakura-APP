@@ -424,6 +424,52 @@ body.overlay-mode #bubbles {
   pointer-events: none;
 }
 
+/* ============================================================
+ * 拖动跟手：悬浮窗里去掉 backdrop-filter
+ *
+ * 拖动是通过 WindowManager.updateViewLayout 挪窗口实现的，窗口一动，
+ * WebView 就要对整棵合成树重新光栅化。而 backdrop-filter 需要**读取
+ * 背后已经画好的像素**再做模糊 —— 每帧窗口位移都得重算一遍，代价很高。
+ *
+ * 悬浮窗里用到毛玻璃的地方：#msgNav（对话框卡片）、.bubble、#mediaPanel，
+ * 三处都是 blur(10px)。实测拖动时明显掉帧。
+ *
+ * 这些地方本来就是半透明浅色底（color-mix ... transparent），
+ * 去掉模糊后观感几乎不变，但每帧省掉三次全区域模糊。
+ * 注意只关悬浮窗的：App 内不动（那里没有拖动，且窗口不透明，模糊好看）。
+ * ============================================================ */
+body.overlay-mode #msgNav,
+body.overlay-mode .bubble,
+body.overlay-mode #mediaPanel,
+body.overlay-mode #bubbles {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* ============================================================
+ * 拖动进行中：body.dragging
+ *
+ * 两件事，都是为了让立绘「跟住手」而不是慢半拍：
+ *
+ * 1) 关掉 #portrait / #portraitWrap 的 transform 过渡。
+ *    平时那点过渡是为了让缩放、位置调整更柔和；但拖动时窗口是逐帧直接
+ *    跟手的，立绘再叠一层过渡就会**落后于窗口**，看起来就是拖不动、发飘。
+ * 2) 关掉立绘的 drop-shadow。
+ *    滤镜要按当前尺寸重新光栅化，拖动时尺寸每帧都在变（呼吸动画 + 位移），
+ *    省掉它能明显减轻每帧负担。
+ * ============================================================ */
+body.overlay-mode.dragging #portrait,
+body.overlay-mode.dragging #portraitWrap,
+body.bubble-mode.dragging #portrait,
+body.bubble-mode.dragging #portraitWrap {
+  transition: none;
+}
+
+body.overlay-mode.dragging #portrait,
+body.bubble-mode.dragging #portrait {
+  filter: none;
+}
+
 /* 气泡本身居中靠下排列（助手气泡靠左但整体居中收窄） */
 body.overlay-mode .bubbleRow {
   justify-content: center;
