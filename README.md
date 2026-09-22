@@ -10,7 +10,7 @@ AI 计算和语音合成都留在电脑 · 手机只负责显示和播放
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Plugin API](https://img.shields.io/badge/Sakura%20Plugin%20API-v4-ff69b4.svg)](#环境要求)
-[![Android](https://img.shields.io/badge/Android-8.0%2B-3ddc84.svg)](#环境要求)
+[![Android](https://img.shields.io/badge/Android-10%2B%20(14%2B%20best)-3ddc84.svg)](#手机端适用的安卓版本)
 
 [灵感来源](#灵感来源) · [功能](#功能) · [安装](#安装) · [使用](#使用) · [配置](#配置项) · [疑难解答](#疑难解答) · [技术说明](#技术说明) · [**已知问题**](#已知问题与未实现功能) · [鸣谢](#鸣谢)
 
@@ -52,6 +52,20 @@ AI 计算和语音合成都留在电脑 · 手机只负责显示和播放
 
 ---
 
+## 灵感来源
+
+Sakura 官方自带一个可选的手机网页插件
+[`sakura_mobile`（手机聊天）](https://github.com/Rvosy/sakura/tree/main/plugins/optional/sakura_mobile)，
+作者 **pa1n9**。**本项目受它启发**：它证明了 `sakura.host.mobile` 这套服务接口
+（`begin` / `poll` / `cancel`，图片走 `sakura.host.artifacts` 传 descriptor）
+足以让第三方插件把手机接进来，完全不用碰 Core 内部 ——
+本项目的聊天提交、历史读取、图片上传就沿用了它验证过的做法。
+
+区别在于定位：官方那个只做**聊天**，本项目多了**立绘、语音和桌宠**。
+只想用手机聊天的话，直接用官方插件就够了。
+
+---
+
 ## 装好之后是什么样
 
 手机装上 App、电脑装好插件后，你就能在手机上看到她 —— **同一份记忆、同一个角色**，
@@ -74,33 +88,6 @@ AI 计算和语音合成都留在电脑 · 手机只负责显示和播放
 **手机端做的只有「显示」和「播放」，所以不发烫也不耗电，换手机不用重配模型。**
 
 > **注意**：电脑必须开着、Sakura 必须运行。这是远程串流，不是离线可用。
-
----
-
-## 灵感来源
-
-Sakura 官方自带一个可选的手机网页插件
-[**`sakura_mobile`（手机聊天）**](https://github.com/Rvosy/sakura/tree/main/plugins/optional/sakura_mobile)，
-作者 **pa1n9**。它把手机浏览器接入桌面端 Sakura 的同一条聊天、历史和角色链 ——
-**本项目正是受它启发**，思路和技术路线都建立在它的基础之上：
-
-| | 官方 `sakura_mobile` | 本项目 |
-| :--- | :--- | :--- |
-| 定位 | 手机浏览器里**聊天** | 手机上看**立绘**、听**语音**、还能当**桌宠** |
-| 界面 | 网页（手机浏览器打开） | 网页 + 安卓 App 外壳 |
-| 立绘 | 无 | 全屏立绘，按语气切换表情 |
-| 语音 | 无 | 电脑合成、手机自动播放 |
-| 桌面立绘 | 无 | 悬浮窗，可拖动、可缩成小球 |
-| 依赖的宿主服务 | `sakura.host.mobile` / `artifacts` / `settings` | 同上，另加 `character` |
-
-**它趟平了最关键的一段路**：证明了 `sakura.host.mobile` 这一层服务接口
-（`start` / `begin` / `poll` / `cancel`、图片走 `sakura.host.artifacts` 传 descriptor）
-足以让第三方插件把手机接进来，而完全不用碰 Core 内部。
-
-本项目的「聊天提交、历史读取、图片上传」这几块，基本沿用了它验证过的做法。
-如果你只想要「用手机聊天」，直接用官方那个插件就够了；本项目多了立绘、语音和桌宠。
-
-> `sakura_mobile` 是可选插件，新用户不预装，需要在 Sakura 设置里的本地插件安装入口导入。
 
 ---
 
@@ -458,14 +445,7 @@ powershell -File tools/build_release.ps1
 
 ### 关于代码编写方式
 
-本项目的代码是**借助 DeepSeek 模型辅助编写**的（对话式结对：由人提出需求、判断方案取舍、
-在真机上验证，模型负责查宿主 API、写实现、排查问题与补测试）。
-
-需要说明的是，这不代表代码没有经过验证：项目里每一处行为都在真机上实测过，
-关键结论都记在文档的「踩过的坑」里（包括若干只有实机才会暴露的问题，
-比如 Android 14 的 MediaProjection 前台服务要求、
-`Path.resolve()` 的 `\\?\` 前缀会让 PowerShell 脚本静默失败等）。
-但**辅助编写仍可能留有疏漏**，请以实测为准；发现问题欢迎提 Issue。
+本项目代码借助 **DeepSeek** 辅助编写，请以实测为准。
 
 ---
 
@@ -550,15 +530,13 @@ powershell -File tools/build_release.ps1
 ### 官方手机网页插件（本项目的灵感来源）
 
 Sakura 自带的 [`sakura_mobile`（手机聊天）](https://github.com/Rvosy/sakura/tree/main/plugins/optional/sakura_mobile)
-由 **pa1n9** 开发。本项目受它启发，沿用了它验证过的
-`sakura.host.mobile` 聊天链路与 `sakura.host.artifacts` 图片传递方式。
-详见上文[灵感来源](#灵感来源)。
+由 **pa1n9** 开发。详见上文[灵感来源](#灵感来源)。
 
 ### 其他
 
 - 感谢 [Shinsekai](https://github.com/RachelForster/Shinsekai) 项目 ——
   它在桌宠与插件生态上的探索，间接影响了 Sakura 的设计取向。
-- 感谢 **DeepSeek** 在代码编写过程中提供的辅助（见上一节）。
+- 感谢 **DeepSeek** 在代码编写过程中提供的辅助。
 
 ---
 
