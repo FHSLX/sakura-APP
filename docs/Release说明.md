@@ -3,7 +3,7 @@
 | 文件 | 装到哪 |
 | :--- | :--- |
 | `App-SakuraRemote.zip` | **手机**。解压后得到 `SakuraRemote-release.apk` 再安装 |
-| `plugin-sakura.remote-1.1.0.zip` | **电脑**。解压后把 `sakura.remote` 目录放到 Sakura 的 `plugins/user/` 下 |
+| `plugin-sakura.remote-1.1.1.zip` | **电脑**。解压后把 `sakura.remote` 目录放到 Sakura 的 `plugins/user/` 下 |
 | `MANUAL.md` | 完整使用手册，参考用 |
 
 两个都要装：插件装电脑，App 装手机。
@@ -22,7 +22,7 @@
 
 完整安装步骤见 `MANUAL.md`，已知问题与版本兼容说明见仓库首页的 README。
 
-## v1.1.0 修复内容
+## v1.1.1 修复内容
 
 这一版集中修了「开启桌面立绘后立绘不显示 / 出现色块」「气泡与输入栏之间空出一条」
 「拖动不跟手」等问题：

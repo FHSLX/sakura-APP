@@ -544,21 +544,23 @@ function installOverlayGestures() {
   }, { passive: false });
 
   const end = (cancelled) => {
-    // 判断这一次是「轻点」还是「长按/拖动」：
-    //   - 没拖动过（dragging=false）
-    //   - 位移小于阈值
-    //   - 不是长按触发的开设置（holdTimer 还在）
-    // 满足就是轻点，用来显示/隐藏对话框。
-    //
-    // 之前这里没有任何轻点处理，所以点立绘什么都不发生 ——
-    // 用户想「点一下学姐看/收气泡」是做不到的。
-    const isTap = !cancelled && !dragging && holdTimer && !longPressed;
+    /*
+     * 判断这一次是「轻点」还是「长按/拖动」。
+     *
+     * 只看两件事：没拖动过、长按没触发过。
+     *
+     * 原来还额外要求 `holdTimer` 非零，那是个很脆的条件 —— `clearHold()`
+     * 会把 holdTimer 清成 0，任何一次多余的 clearHold 都会让轻点被判成
+     * 「不是轻点」，表现就是「点立绘没反应」。长按是否发生过，用
+     * longPressed 这个显式标记更可靠。
+     */
+    const isTap = !cancelled && !dragging && !longPressed;
     holding = false;
     dragging = false;
     document.body.classList.remove('dragging');
     clearHold();
     // 位移已经逐次直接下发了，这里不需要再补发
-    if (isTap) toggleBubbleByTap();
+    if (isTap) onPortraitTap(startX, startY, target);
   };
   target.addEventListener('touchend', () => end(false), { passive: true });
   target.addEventListener('touchcancel', () => end(true), { passive: true });
@@ -838,19 +840,40 @@ const CLICK_THROUGH_KEEP = [
   '#hint',
 ].join(',');
 
+/**
+ * 立绘轻点的统一入口（穿透 / 收放气泡）。
+ *
+ * 挂在 window 上是为了让 installOverlayGestures 的 touchend 也能调用 ——
+ * 两处各自判定会出现「同一个轻点被处理两次」或互相抢先。
+ */
+function onPortraitTap(x, y, targetEl) {
+  if (typeof window.__petOnPortraitTap === 'function') {
+    window.__petOnPortraitTap(x, y, targetEl);
+  }
+}
+
 function installClickThrough() {
   const native = nativeBridge();
   if (!native || typeof native.setTouchable !== 'function') return;
 
   const ALPHA_MIN = 16;    // 低于这个 alpha 视为「透明」
-  const TAP_MAX_MOVE = 12; // 位移不超过这么多才算轻点
-  // 不可触摸的时长，够这一下落到桌面。
-  // 留了 window.__petRestoreMs 覆盖口子：140ms 太短，外部（比如 CDP 调试）
-  // 来不及观察到状态变化就没法验证，临时放长即可。
-  const defaultRestoreMs = 140;
+
+  /*
+   * 穿透态的持续时长。
+   *
+   * 不是「让当前这一下穿过去」—— Android 在手势开始时就读定了
+   * FLAG_NOT_TOUCHABLE，中途改它只会让这一下消失（详见 passThroughOnce 的说明）。
+   * 这段时长是留给用户**再点一下**的窗口：那一下会真正落到底下的桌面图标。
+   *
+   * 取 1300ms：够从容地点第二下，又不会久到让用户以为窗口卡住了。
+   * 留了 window.__petRestoreMs 覆盖口子方便调试时观察状态。
+   */
+  const PASSTHROUGH_MS = 1300;
 
   let restoreTimer = 0;
   let lastPassAt = 0;
+  /** 当前是否处于穿透态（用于安全兜底与调试）。 */
+  let passthroughArmed = false;
 
   // 排查用：记录每一次穿透尝试。原生桥是 Java 注入对象，
   // 没法从 JS 侧包裹它的方法做探针，所以进度只能记在这里。
@@ -869,9 +892,25 @@ function installClickThrough() {
   function restoreTouchable() {
     clearTimeout(restoreTimer);
     restoreTimer = 0;
+    passthroughArmed = false;
     setTouchable(true);
   }
 
+  /**
+   * 进入「穿透态」。
+   *
+   * 这里有个容易想错的地方，值得写清楚：
+   *
+   * 原设计以为「setTouchable(false) → 这一下就落到桌面了」，
+   * 实际上 Android 是在**手势开始时**读一次 FLAG_NOT_TOUCHABLE 决定事件
+   * 归谁，中途改这个标志**不会**把已经开始的这一下重新派发给下层窗口 ——
+   * 它只是让当前这一下从此收不到后续事件，然后消失。
+   * 用户看到的就是「点透明处毫无反应」。
+   *
+   * 所以正确做法是让穿透态**持续一小段时间**：这次点击被吃掉（本来也点不到
+   * 桌面），但紧接着的下一次点击会真正落到底下的桌面图标上。
+   * 这段时间就是给用户「再点一下」的窗口。
+   */
   function passThroughOnce() {
     const now = Date.now();
     if (now - lastPassAt < 300) {
@@ -879,11 +918,12 @@ function installClickThrough() {
       return;
     }
     lastPassAt = now;
-    window.__petPassLog.push({ at: now, step: 'pass' });
+    window.__petPassLog.push({ at: now, step: 'arm-passthrough' });
     setTouchable(false);
-    // 只靠定时器恢复 —— 这期间收不到任何网页事件，不能依赖后续事件
+    passthroughArmed = true;
+    // 只靠定时器恢复 —— 穿透期间收不到任何网页事件，不能依赖后续事件
     clearTimeout(restoreTimer);
-    restoreTimer = setTimeout(restoreTouchable, window.__petRestoreMs || defaultRestoreMs);
+    restoreTimer = setTimeout(restoreTouchable, window.__petRestoreMs || PASSTHROUGH_MS);
   }
 
   // 兜底：万一上面那条路径出问题，周期性地把触摸恢复回来，
@@ -892,54 +932,31 @@ function installClickThrough() {
     if (!restoreTimer) setTouchable(true);
   }, 2000);
 
-  function handleTap(event) {
-    if (!isOverlayPage()) {
-      window.__petPassLog.push({ at: Date.now(), step: 'not-overlay' });
-      return;
+  /**
+   * 立绘上的轻点统一走这里，不再由 pointerup 与手势两套逻辑各判一次
+   * （两套都判会出现「同一个轻点被处理两次」或「两边互相抢先」）。
+   *
+   * 判定只有两步：
+   *   1. 落在交互控件上（对话框、输入框、按钮、配置页）→ 什么都不做
+   *   2. 立绘透明处 → 进入穿透态；人物本体 → 收放对话框
+   */
+  function handlePortraitTap(x, y, targetEl) {
+    if (!isOverlayPage()) return;
+    const target = targetEl || null;
+    if (target && target instanceof Element && target.closest(CLICK_THROUGH_KEEP)) {
+      return;   // 交互控件，交给它自己处理
     }
-    if (event.button !== undefined && event.button !== 0) return;
-    const target = event.target;
-    if (!(target instanceof Element)) {
-      window.__petPassLog.push({ at: Date.now(), step: 'not-element' });
-      return;
-    }
-    // 碰到任何交互控件就正常处理，不穿透
-    const keep = target.closest(CLICK_THROUGH_KEEP);
-    if (keep) {
-      window.__petPassLog.push({ at: Date.now(), step: 'keep', sel: String(keep.id || keep.className) });
-      return;
-    }
-
-    // 只有立绘的透明部分才穿透，人物本体要能拖动/长按。
-    // 这一条就够了，不需要再问 elementFromPoint —— 立绘区域本来就包含
-    // #stage 这类容器，再问一次会把本该穿透的位置判成「有元素」而挡掉。
-    const alpha = portraitAlphaAt(event.clientX, event.clientY);
+    const alpha = portraitAlphaAt(x, y);
     if (alpha >= ALPHA_MIN) {
       window.__petPassLog.push({ at: Date.now(), step: 'opaque', alpha: alpha });
+      toggleBubbleByTap();
       return;
     }
     window.__petPassLog.push({ at: Date.now(), step: 'transparent', alpha: alpha });
     passThroughOnce();
   }
 
-  window.addEventListener('pointerdown', (event) => {
-    window.__petTapCandidate = { x: event.clientX, y: event.clientY, target: event.target };
-  }, { passive: true, capture: true });
-
-  window.addEventListener('pointerup', (event) => {
-    const candidate = window.__petTapCandidate;
-    window.__petTapCandidate = null;
-    if (!candidate) {
-      window.__petPassLog.push({ at: Date.now(), step: 'no-candidate' });
-      return;
-    }
-    const moved = Math.hypot(event.clientX - candidate.x, event.clientY - candidate.y);
-    if (moved > TAP_MAX_MOVE) {
-      window.__petPassLog.push({ at: Date.now(), step: 'drag', moved: Math.round(moved) });
-      return;   // 是拖动，不是轻点
-    }
-    handleTap({ clientX: event.clientX, clientY: event.clientY, target: candidate.target });
-  }, { passive: true, capture: true });
+  window.__petOnPortraitTap = handlePortraitTap;
 
   // 页面隐藏时一定要恢复，否则回到前台就点不动了
   document.addEventListener('visibilitychange', () => {
@@ -1203,8 +1220,10 @@ async function sendWithScreenshot(dataUrl) {
     thinking.row.remove();
     const segments = segmentsFromReply(data);
     for (const segment of segments) {
+      // deferText：先建空气泡，等这段语音播放时再逐字填
       const node = addBubble('assistant', segment.rawText || segment.text, {
         secondary: segment.rawText ? segment.text : '',
+        deferText: true,
       });
       segment.bubble = node.bubble;
       setPortrait(segment.tone);
@@ -2124,18 +2143,23 @@ function addBubble(role, text, options = {}) {
   } else {
     const secondary = String(options.secondary || '').trim();
     const primary = String(text || '').trim();
+    // deferText：先建好空容器，等轮到这条语音播放时再逐字填进去。
+    // 完整内容记在节点上，供 revealBubbleText 使用。
+    const defer = !!options.deferText;
     if (secondary && secondary !== primary) {
       const original = document.createElement('div');
       original.className = 'textOriginal';
-      original.textContent = primary;
+      original.textContent = defer ? '' : primary;
       const translation = document.createElement('div');
       translation.className = 'textTranslation';
-      translation.textContent = secondary;
+      translation.textContent = defer ? '' : secondary;
       bubble.appendChild(original);
       bubble.appendChild(translation);
     } else {
-      bubble.textContent = primary;
+      bubble.textContent = defer ? '' : primary;
     }
+    bubble._pendingText = primary;
+    bubble._pendingSecondary = secondary;
   }
   row.appendChild(bubble);
   el.bubbles.appendChild(row);
@@ -2441,6 +2465,129 @@ function showBubble() {
   if (wasHidden) refreshBubbleLayout();
 }
 
+/* ---------- 逐字显示（打字机） ----------
+ *
+ * 为什么要做：一次回复会被切成多条 segment，每条各自合成一段语音。
+ * 如果文字一次性全铺出来，用户会「先读完后听到」，语音和文字完全脱节，
+ * 观感上像两条不相干的流。
+ *
+ * 所以改成：气泡先建好但**内容是空的**，等到这条 segment 的语音真正开始
+ * 播放时，再按音频时长把文字逐字填进去 —— 读完刚好也说完了。
+ *
+ * 没开语音时（或合成失败）不能一直空着，退回到按字数估算的节奏补上，
+ * 否则用户会看到一堆空气泡。
+ */
+
+/** 没有音频可依据时，每个字的间隔（毫秒）。 */
+const TYPE_FALLBACK_MS = 55;
+/** 逐字最快不超过这个间隔，避免长文本一闪而过。 */
+const TYPE_MIN_MS = 18;
+/**
+ * 逐字最慢不超过这个间隔。
+ *
+ * 入参单位是秒；一旦上游给错单位或时长异常，间隔会被算成几十秒，
+ * 看起来就是文字卡住不出来。有上限就只会慢一点，不会卡死。
+ */
+const TYPE_MAX_MS = 260;
+
+/** 停掉某条气泡正在进行的逐字动画。 */
+function stopBubbleTyping(bubble) {
+  if (!bubble) return;
+  if (bubble._typeTimer) {
+    clearInterval(bubble._typeTimer);
+    bubble._typeTimer = 0;
+  }
+}
+
+/**
+ * 把气泡里的文字逐字显示出来。
+ *
+ * durationMs：音频总时长；不给就按字数估算。
+ * 结束时一定把完整内容补上，不能出现「显示到一半就停了」。
+ */
+function revealBubbleText(bubble, durationMs) {
+  if (!bubble) return;
+  stopBubbleTyping(bubble);
+
+  const primary = String(bubble._pendingText || '');
+  const secondary = String(bubble._pendingSecondary || '');
+  const hasSecondary = secondary && secondary !== primary;
+
+  const primaryEl = hasSecondary ? bubble.querySelector('.textOriginal') : bubble;
+  const secondaryEl = hasSecondary ? bubble.querySelector('.textTranslation') : null;
+  if (!primaryEl) return;
+
+  const total = Math.max(primary.length, hasSecondary ? secondary.length : 0);
+  if (!total) return;
+
+  // 先把完整文字写回 dataset，历史导航/翻页仍能拿到全文
+  const row = bubble.parentElement;
+  if (row && row.dataset) {
+    if (!row.dataset.primary) row.dataset.primary = primary;
+    if (!row.dataset.secondary) row.dataset.secondary = secondary;
+  }
+
+  // 音频时长未知或过短时，按字数估算一个合理节奏
+  let perChar = TYPE_FALLBACK_MS;
+  if (durationMs && isFinite(durationMs) && durationMs > 0) {
+    perChar = Math.max(TYPE_MIN_MS, (durationMs * 1000) / total);
+  }
+  /*
+   * 兜底上限：单字间隔不能太大。
+   *
+   * 入参单位是**秒**（blob.duration 就是秒）。万一上游给错单位、或者拿到
+   * 一个异常大的时长，perChar 会被算成几十秒 —— 现象就是「文字一直不出来」。
+   * 实测踩过：把 1000（毫秒）当秒传进来，算出每字 50 秒，停在第一个字不动。
+   * 超过上限就整体压缩，宁可快一点也不能卡住。
+   */
+  if (perChar > TYPE_MAX_MS) perChar = TYPE_MAX_MS;
+
+  let shown = 0;
+  const apply = () => {
+    primaryEl.textContent = primary.slice(0, shown);
+    if (secondaryEl) secondaryEl.textContent = secondary.slice(0, shown);
+  };
+
+  // 先清空再逐字填
+  primaryEl.textContent = '';
+  if (secondaryEl) secondaryEl.textContent = '';
+  bubble.classList.add('revealing');
+
+  bubble._typeTimer = setInterval(() => {
+    shown += 1;
+    if (shown >= total) {
+      shown = total;
+      apply();
+      stopBubbleTyping(bubble);
+      bubble.classList.remove('revealing');
+      return;
+    }
+    apply();
+  }, perChar);
+
+  // 立即显示第一个字，避免开头有一个间隔的空白
+  shown = 1;
+  apply();
+}
+
+/** 立刻把内容补全（用于跳过动画、或语音提前结束）。 */
+function finishBubbleText(bubble) {
+  if (!bubble) return;
+  stopBubbleTyping(bubble);
+  bubble.classList.remove('revealing');
+  const primary = String(bubble._pendingText || '');
+  const secondary = String(bubble._pendingSecondary || '');
+  const hasSecondary = secondary && secondary !== primary;
+  if (hasSecondary) {
+    const a = bubble.querySelector('.textOriginal');
+    const b = bubble.querySelector('.textTranslation');
+    if (a) a.textContent = primary;
+    if (b) b.textContent = secondary;
+  } else {
+    bubble.textContent = primary;
+  }
+}
+
 /**
  * 对话框显隐后刷新布局。
  *
@@ -2585,7 +2732,11 @@ function renderQuickActions() {
 }
 
 function enqueueSegment(segment) {
-  if (!state.voiceEnabled || !segment.rawText) return;
+  if (!state.voiceEnabled || !segment.rawText) {
+    // 没有语音可依据，仍按估算节奏逐字显示 —— 不能留着空气泡
+    if (segment.bubble) revealBubbleText(segment.bubble, 0);
+    return;
+  }
   state.pending.push(segment);
   drainQueue();
 }
@@ -2633,6 +2784,8 @@ async function playSegment(segment) {
       }
       systemNote(message);
       state.busy = false;
+      // 合成失败不能连文字都不显示
+      revealBubbleText(segment.bubble, 0);
       drainQueue();
       return;
     }
@@ -2642,6 +2795,17 @@ async function playSegment(segment) {
     setPortrait(segment.tone);
     player.onended = null;
     player.src = url;
+    /*
+     * 逐字显示：等到这条语音真的要出声了才开始打字。
+     *
+     * 时长优先取 blob 的实际时长；某些容器格式（如部分 WAV）在
+     * duration 上会报 Infinity 或 NaN，那就按字数估算 —— revealBubbleText
+     * 里会退回 TYPE_FALLBACK_MS 的节奏，不会卡住。
+     */
+    let audioSeconds = blob && isFinite(blob.duration) && blob.duration > 0 ? blob.duration : 0;
+    if (!audioSeconds && isFinite(player.duration) && player.duration > 0) {
+      audioSeconds = player.duration;
+    }
     try {
       await player.play();
     } catch (error) {
@@ -2649,11 +2813,16 @@ async function playSegment(segment) {
       showHintOnce();
       state.pending.unshift(segment);
       state.busy = false;
+      // 放不出来也必须把文字显示出来，否则这一条永远是空的
+      revealBubbleText(segment.bubble, 0);
       return;
     }
+    revealBubbleText(segment.bubble, audioSeconds);
     state.busy = false;
     const finish = () => {
       segment.bubble.classList.remove('speaking');
+      // 音频提前结束（或出错）时，别让文字停在半截
+      finishBubbleText(segment.bubble);
       URL.revokeObjectURL(url);
       drainQueue();
     };
@@ -2668,6 +2837,9 @@ async function playSegment(segment) {
 }
 
 function stopVoice() {
+  // 先把挂起的逐字动画收尾，再清队列。
+  // 顺序反了就遍历到已经被清空的数组，等于没执行。
+  state.pending.forEach(function (seg) { if (seg.bubble) finishBubbleText(seg.bubble); });
   state.pending.length = 0;
   state.busy = false;
   if (audio) {
@@ -2825,8 +2997,10 @@ async function send(text, file) {
     thinking.row.remove();
     const segments = segmentsFromReply(data);
     for (const segment of segments) {
+      // deferText：先建空气泡，等这段语音播放时再逐字填
       const node = addBubble('assistant', segment.rawText || segment.text, {
         secondary: segment.rawText ? segment.text : '',
+        deferText: true,
       });
       segment.bubble = node.bubble;
       setPortrait(segment.tone);

@@ -2,8 +2,13 @@
 #
 # Usage (run from the repository root):
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools\install_to_sakura.ps1
-#   powershell -NoProfile -ExecutionPolicy Bypass -File tools\install_to_sakura.ps1 -SakuraRoot "F:\sakura"
+#   powershell -NoProfile -ExecutionPolicy Bypass -File tools\install_to_sakura.ps1 -SakuraRoot "D:\Some\Sakura"
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools\install_to_sakura.ps1 -Disable
+#
+# SakuraRoot defaults to the SAKURA_ROOT environment variable when set; otherwise
+# the script looks for sakura.exe in a few common places and asks you to pass
+# -SakuraRoot explicitly if it cannot find one. It deliberately does NOT hardcode
+# any machine-specific path.
 #
 # Layout it produces (two DIFFERENT folders on purpose):
 #   <root>\plugins\user\<id>\        plugin code      (updating the plugin replaces this)
@@ -17,13 +22,40 @@
 
 [CmdletBinding()]
 param(
-    [string]$SakuraRoot = "F:\sakura",
+    [string]$SakuraRoot = "",
     [string]$PluginId = "sakura.remote",
     [switch]$Disable,
     [switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
+
+# Resolve the Sakura install directory: explicit -SakuraRoot > SAKURA_ROOT env >
+# a few common locations. Fail with a clear message instead of assuming a path.
+if (-not $SakuraRoot) {
+    if ($env:SAKURA_ROOT) {
+        $SakuraRoot = $env:SAKURA_ROOT
+    } else {
+        $candidates = @(
+            (Join-Path $env:LOCALAPPDATA "Programs\Sakura"),
+            (Join-Path $env:ProgramFiles "Sakura"),
+            (Join-Path ${env:ProgramFiles(x86)} "Sakura"),
+            (Join-Path $env:USERPROFILE "Sakura")
+        )
+        foreach ($candidate in $candidates) {
+            if ($candidate -and (Test-Path (Join-Path $candidate "sakura.exe"))) {
+                $SakuraRoot = $candidate
+                break
+            }
+        }
+    }
+}
+if (-not $SakuraRoot) {
+    throw "找不到 Sakura 安装目录。请用 -SakuraRoot 指定，或设置 SAKURA_ROOT 环境变量。"
+}
+if (-not (Test-Path (Join-Path $SakuraRoot "sakura.exe"))) {
+    Write-Warning "sakura.exe not found under $SakuraRoot - please check -SakuraRoot."
+}
 
 $repo = Split-Path -Parent $PSScriptRoot
 

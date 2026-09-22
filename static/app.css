@@ -1605,6 +1605,30 @@ body:not(.overlay-mode) .bubbleRow.navHit .bubble {
 
 .bubble.speaking { border-color: var(--accent); }
 
+/*
+ * 逐字显示进行中：末尾跟一个闪烁光标。
+ *
+ * 存在的意义是「让人知道还在出字」—— 语音比文字长时，没有提示会显得卡住。
+ * 用 ::after 追加而不是插 DOM 节点：文字是逐字重写 textContent 的，
+ * 插进去的真节点会被下一次重写抹掉。
+ */
+.bubble.revealing::after {
+  content: '';
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: -0.15em;
+  background: currentColor;
+  opacity: 0.55;
+  animation: caretBlink 900ms steps(1, end) infinite;
+}
+
+@keyframes caretBlink {
+  0%, 49% { opacity: 0.55; }
+  50%, 100% { opacity: 0; }
+}
+
 /* 桌宠式双行字幕：中文是主体（大），日文原文缩小作为参考 */
 .bubble {
   display: flex;
