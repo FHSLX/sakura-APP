@@ -160,6 +160,22 @@ public class OverlayService extends Service {
     private float moveRemainY;
 
     /** 拖动位移是否已排入下一帧（避免同一帧重复排）。 */
+    /**
+     * 是否正在拖动窗口（由网页在拖动开始/结束时告知）。
+     *
+     * 为什么需要：窗口尺寸随时可能变（网页每 400ms 会按立绘和对话框内容重算一次），
+     * 而 resize 之后必须把窗口夹回屏幕内，否则会跑到屏幕外看不见。
+     * 但拖动过程中这个夹取会把用户刚拖出来的位移**整个抵消**掉 ——
+     * 表现就是「拖不动，得先点一下再拖」。
+     * 所以拖动期间跳过位置夹取，松手后再由下一次 resize 正常校正。
+     */
+    private volatile boolean dragInProgress;
+
+    /** 网页在拖动开始/结束时调用。 */
+    public void setDragging(boolean dragging) {
+        dragInProgress = dragging;
+    }
+
     private boolean moveFlushScheduled;
     private Choreographer choreographer;
 
@@ -646,11 +662,18 @@ public class OverlayService extends Service {
         }
         layoutParams.width = width;
         layoutParams.height = height;
-        // 只夹到「完全可见」范围。
-        // 之前试过「保持右下角不动」去锚定，结果窗口从 886 长到 1048 时
-        // 被推出屏幕（实测 mAttrs=(-99,-493)），所以改成简单可靠的夹紧。
-        layoutParams.x = Math.max(0, Math.min(screenWidth - width, layoutParams.x));
-        layoutParams.y = Math.max(0, Math.min(screenHeight - height, layoutParams.y));
+        /*
+         * 只夹到「完全可见」范围。
+         * 之前试过「保持右下角不动」去锚定，结果窗口从 886 长到 1048 时
+         * 被推出屏幕（实测 mAttrs=(-99,-493)），所以改成简单可靠的夹紧。
+         *
+         * 但**拖动期间必须跳过**：这个夹取会把用户刚拖出来的位移整个抵消，
+         * 表现就是「拖不动，得先点一下」。松手后的下一次 resize 会正常校正。
+         */
+        if (!dragInProgress) {
+            layoutParams.x = Math.max(0, Math.min(screenWidth - width, layoutParams.x));
+            layoutParams.y = Math.max(0, Math.min(screenHeight - height, layoutParams.y));
+        }
         updateLayout();
     }
 
@@ -666,12 +689,25 @@ public class OverlayService extends Service {
      * updateViewLayout，天然对齐刷新率。
      */
     public void moveWindowBy(final float dx, final float dy) {
-        moveRemainX += dx;
-        moveRemainY += dy;
-        scheduleMoveFlush();
+        /*
+         * 这里跑在 JavaBridge 线程，而 Choreographer.getInstance()
+         * **必须在主线程调用** —— 它内部走 Looper.myLooper() 取当前线程的 Looper。
+         * 在别的线程调，拿到的 Choreographer 会绑在错误的 Looper 上
+         *（或者直接抛异常被吞掉），于是 postFrameCallback 永远等不到那一帧。
+         *
+         * 实际表现就是：**第一次拖动完全不动，要先点一下立绘才生效**。
+         * 那一下点击触发了网页重排，主线程顺手又调度了一次，之后才正常。
+         *
+         * 所以：先用 handler.post 切到主线程，再在那边做合并调度。
+         */
+        handler.post(() -> {
+            moveRemainX += dx;
+            moveRemainY += dy;
+            scheduleMoveFlush();
+        });
     }
 
-    /** 把攒下的位移在下一帧一次性应用。 */
+    /** 把攒下的位移在下一帧一次性应用。**必须在主线程调用。** */
     private void scheduleMoveFlush() {
         if (moveFlushScheduled) {
             return;
@@ -926,6 +962,11 @@ public class OverlayService extends Service {
         @Override
         public void setTouchable(boolean touchable) {
             OverlayService.this.onTouchableChanged(touchable);
+        }
+
+        @Override
+        public void setDragging(boolean dragging) {
+            OverlayService.this.setDragging(dragging);
         }
 
         @Override

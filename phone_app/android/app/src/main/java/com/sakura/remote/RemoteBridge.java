@@ -54,6 +54,12 @@ public class RemoteBridge {
         /** 切换窗口是否接收触摸（false = 点击穿透到下层）。 */
         void setTouchable(boolean touchable);
 
+        /**
+         * 告知原生「正在拖动窗口」。拖动期间会跳过 resize 后的位置夹取 ——
+         * 否则窗口尺寸一变就把拖动位移抵消掉（表现为拖不动）。
+         */
+        void setDragging(boolean dragging);
+
         /** 按增量移动窗口（去掉原生标题栏后，拖动由网页手势驱动）。 */
         void moveWindowBy(float dx, float dy);
 
@@ -214,6 +220,12 @@ public class RemoteBridge {
     @JavascriptInterface
     public void setTouchable(boolean touchable) {
         host.setTouchable(touchable);
+    }
+
+    /** 告知原生拖动开始/结束，拖动期间跳过 resize 的位置夹取。 */
+    @JavascriptInterface
+    public void setDragging(boolean dragging) {
+        host.setDragging(dragging);
     }
 
     /**

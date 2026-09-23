@@ -348,6 +348,12 @@ public class MainActivity extends BridgeActivity implements RemoteBridge.Host {
         // no-op：仅悬浮窗支持
     }
 
+    /** App 是整屏窗口，不需要跳过夹取。 */
+    @Override
+    public void setDragging(boolean dragging) {
+        // no-op：仅悬浮窗需要
+    }
+
     /** App 是整屏窗口，没有可拖动的悬浮位置。 */
     @Override
     public void moveWindowBy(float dx, float dy) {

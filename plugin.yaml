@@ -3,7 +3,7 @@ id: sakura.remote
 name: 手机远程端
 author: FHSLX
 description: 让手机浏览器 / WebView App 远程连接桌宠：显示立绘并随语气切换表情，接收电脑端合成的语音并自动播放。
-version: 1.2.4
+version: 1.2.5
 entry: plugin:SakuraRemotePlugin
 enabled: false
 priority: 75

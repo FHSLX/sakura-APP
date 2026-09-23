@@ -506,6 +506,21 @@ function installOverlayGestures() {
    *
    * 亚像素精度由原生负责：moveWindowBy 会累积不足 1px 的余量。
    */
+
+  /**
+   * 通知原生拖动开始/结束。
+   *
+   * 原生据此在窗口尺寸变化后**跳过位置夹取** —— 那个夹取会把刚拖出来的
+   * 位移整个抵消，表现就是「拖不动，得先点一下」。
+   * 老版本 APK 没有这个桥方法，所以调用要容错。
+   */
+  function setNativeDragging(value) {
+    try {
+      const n = nativeBridge();
+      if (n && typeof n.setDragging === 'function') n.setDragging(!!value);
+    } catch (error) { /* 忽略：旧版 APK 没这个方法 */ }
+  }
+
   function move(dx, dy) {
     try {
       /*
@@ -602,6 +617,15 @@ function installOverlayGestures() {
       // 拖动期间关掉滤镜与过渡（见 app.css 的 body.dragging）
       clearPressFeedback();  // 拖动不是「按住」，撤掉按下反馈
       document.body.classList.add('dragging');
+      /*
+       * 告诉原生「正在拖动」。
+       *
+       * 原生在窗口尺寸变化后会做一次位置夹取（把窗口拉回屏幕内），
+       * 而窗口尺寸是网页每 400ms 按立绘和对话框内容重算的 ——
+       * 夹取会把刚拖出来的位移整个抵消，表现就是「拖不动，得先点一下」。
+       * 拖动期间原生跳过夹取，松手后再正常校正。
+       */
+      setNativeDragging(true);
     }
     lastX = touch.clientX;
     lastY = touch.clientY;
@@ -622,6 +646,9 @@ function installOverlayGestures() {
      */
     const isTap = !cancelled && !dragging && !longPressed;
     holding = false;
+    if (dragging) {
+      setNativeDragging(false);   // 松手后恢复正常的 resize 校正
+    }
     dragging = false;
     document.body.classList.remove('dragging');
     // 松手即恢复原样：半透明/放大都撤掉，桌面让位也收回
@@ -1098,6 +1125,13 @@ function installContentWidthSync() {
   function measure() {
     // 只服务悬浮窗；App 里的布局由 CSS 自己管，别插手
     if (!isOverlayPage()) return;
+    /*
+     * 拖动期间不重算窗口尺寸。
+     * 除了避免和拖动抢主线程，更重要的是：窗口尺寸一变，
+     * 立绘在窗口内的位置就会重排，拖动时看起来像「跳一下」。
+     * 松手后的下一次定时重算会把尺寸校正回来。
+     */
+    if (document.body.classList.contains('dragging')) return;
     const naturalW = portrait.naturalWidth || 0;
     const naturalH = portrait.naturalHeight || 0;
     if (!naturalW || !naturalH) return;
