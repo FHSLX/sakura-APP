@@ -737,6 +737,44 @@ function setPressFeedbackEnabled(enabled, options = {}) {
  * 窗口本身仍然只能整块接收触摸（Android 只支持矩形区域），
  * 但按下的那一刻我们能精确知道手指在不在人物身上，并据此决定给什么反馈。
  */
+/**
+ * 立绘容器的缩放，统一由这里写。
+ *
+ * 为什么不用 CSS 变量 + calc 去合成：
+ * 试过 `transform: scale(calc(var(--pet-scale) * (1 + var(--pet-press))))`，
+ * 结果是「让位」那档生效、「按下」那档不生效 —— 同一套写法只差数值正负，
+ * 表现却不一致，说明 calc 与自定义属性嵌套在这个 WebView 里不可靠。
+ * 而且多条规则各自写 transform 会互相覆盖（同优先级下后者赢），
+ * 按下/拖动切换时来回争抢，画面就一闪一闪。
+ *
+ * 现在只有**一个**地方写这个属性，取值在 JS 里算好，不存在争抢。
+ */
+function applyPortraitTransform() {
+  const wrap = document.querySelector('#portraitWrap');
+  if (!wrap) return;
+  const base = state.portraitScale || 1;
+  let factor = 1;
+  if (document.body.classList.contains('pressing')) {
+    factor = 1 + PRESS_LIFT;
+  } else if (document.body.classList.contains('pass-through')) {
+    factor = 1 - PASS_SHRINK;
+  }
+  /*
+   * 居中方式两种模式不同，不能一律加 translateX(-50%)：
+   *   overlay：容器是 position: relative + left: auto + margin: 0 auto，
+   *            靠 auto margin 居中，再加 translateX 会把它推到左边；
+   *   小球/其他：容器是 position: absolute + left: 50%，需要 translateX(-50%)。
+   */
+  const centeredByMargin = document.body.classList.contains('overlay-mode');
+  const shift = centeredByMargin ? '' : 'translateX(-50%) ';
+  wrap.style.transform = shift + 'scale(' + (base * factor).toFixed(4) + ')';
+}
+
+/** 按下时放大多少（1.008 的量级，手机上不再明显跳动）。 */
+const PRESS_LIFT = 0.008;
+/** 让位时缩小多少。 */
+const PASS_SHRINK = 0.03;
+
 function pressFeedbackAt(x, y) {
   if (!el.body) {
     el.body = document.body;
@@ -746,11 +784,13 @@ function pressFeedbackAt(x, y) {
     if (pressFeedbackEnabled()) {
       el.body.classList.add('pressing');
       pressingActive = true;
+      applyPortraitTransform();
     }
     return;
   }
   // 透明处：让位给桌面
   el.body.classList.add('pass-through');
+  applyPortraitTransform();
   try {
     nativeBridge().setTouchable(false);
   } catch (error) { /* 忽略 */ }
@@ -771,6 +811,7 @@ function clearPressFeedback() {
     body.classList.remove('pressing');
     pressingActive = false;
   }
+  applyPortraitTransform();   // 松手立刻复原
   if (wasPassThrough) {
     try {
       nativeBridge().setTouchable(true);
@@ -1252,6 +1293,7 @@ function installContentWidthSync() {
     wrap.style.removeProperty('width');
     // --pet-scale 必须写在 #portraitWrap 上（applyPortraitScale 写的是它）
     wrap.style.setProperty('--pet-scale', scale.toFixed(3));
+  applyPortraitTransform();   // 缩放滑块变化时同步（保持同一个写入点）
 
     // 立绘高度刚确定，把「上下位置」按新高度重算成像素。
     // 不重算的话：设位置时若高度还是 0/旧值，偏移量就是错的，

@@ -515,18 +515,20 @@ body.overlay-mode.pass-through #stage {
   transition: opacity 160ms ease;
 }
 
-body.overlay-mode.pass-through #portraitWrap {
-  transform: scale(0.97);
+/* 让位：轻微缩小，同样只改分量（负值） */
+body.overlay-mode.pass-through {
+  --pet-press: -0.03;
 }
 
 /*
  * 按到本体：放大一点点，作为「点到了」的体感反馈。
  *
- * 幅度取 1.008 —— 1.02 在手机上看太夸张了（立绘会明显一跳）。
- * 这个量级刚好能感觉到「有反应」，又不会让画面跳动。
+ * 幅度 0.008（即 scale 1.008）—— 1.02 在手机上看太夸张，立绘会明显一跳。
+ * 只改 --pet-press 这个分量，由上面那条统一的 transform 公式合成，
+ * 避免与其它状态争夺 transform 属性（那正是闪烁的来源）。
  */
-body.overlay-mode.pressing #portraitWrap {
-  transform: scale(1.008);
+body.overlay-mode.pressing {
+  --pet-press: 0.008;
 }
 
 /* 透明态下不要有任何交互反馈，否则会误导用户以为还能点它 */
@@ -551,6 +553,9 @@ body.overlay-mode.dragging #portraitWrap,
 body.bubble-mode.dragging #portrait,
 body.bubble-mode.dragging #portraitWrap {
   transition: none;
+  /* 拖动期间停掉呼吸/说话动画：它动的是 --pet-lift 自定义属性，
+     CSS 变量不做插值、只能在 0 与 -18px 之间跳变，看起来就是持续闪烁。 */
+  animation: none;
 }
 
 body.overlay-mode.dragging #portrait,
@@ -711,7 +716,17 @@ body.overlay-mode #portraitWrap {
      写死会和实际分配不一致，超出的部分会压住下面的对话框。 */
   width: 100%;
   height: 100%;
-  transform: scale(var(--pet-scale, 1));
+  /*
+   * transform 不在这里写 —— 由 JS 的 applyPortraitTransform() 单独负责。
+   *
+   * 原因：原来 #portraitWrap、.pressing、.pass-through 三条规则都写 transform，
+   * 同优先级下位置靠后的这条把前面全盖掉，于是「按住放大」实际没生效，
+   * 而 body.dragging 切换时几条规则来回争抢，画面一闪一闪。
+   * 试过用 calc + 自定义属性合成，结果同一套写法「让位」生效、「按下」不生效，
+   * 说明这条路径在这个 WebView 里不可靠。
+   *
+   * 现在全项目只有 applyPortraitTransform() 一个地方写这个属性，不存在争抢。
+   */
   transform-origin: 50% 100%;
 }
 
