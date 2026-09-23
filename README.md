@@ -605,7 +605,10 @@ Sakura 自带的 [`sakura_mobile`（手机聊天）](https://github.com/Rvosy/sa
 
 ## 许可证
 
-[MIT](LICENSE)
+本项目采用 [MIT License](LICENSE)，Copyright © 2026 FHSLX。
+
+与 Sakura 官方的关系、灵感来源、角色资源归属等说明，见
+[NOTICE](NOTICE)（那份文件不属于许可证正文，只是把关系写清楚）。
 
 ---
 

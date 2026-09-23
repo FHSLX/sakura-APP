@@ -70,7 +70,8 @@ $pluginFiles = @(
     "web_ui.py",
     "config.json",
     "restart_helper.ps1",
-    "LICENSE"
+    "LICENSE",
+    "NOTICE"
 )
 $copied = 0
 foreach ($name in $pluginFiles) {

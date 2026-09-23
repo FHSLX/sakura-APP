@@ -1,0 +1,33 @@
+# 第三方关系说明
+
+本文件不属于许可证正文（许可证见 [LICENSE](LICENSE)，为标准 MIT）。
+它只是把「本项目与 Sakura 官方的关系」写清楚，避免误解。
+
+## 与 Sakura Desktop Pet 的关系
+
+本项目是 **[Sakura Desktop Pet](https://github.com/Rvosy/sakura)** 的**第三方扩展**，
+与官方**无隶属关系**，也不是官方项目。
+
+- Sakura Desktop Pet：作者 **Rvosy**，采用 MIT License（Copyright © 2026 Rvosy）
+- 本项目的插件与 App 都建立在它之上 —— 没有 Sakura，
+  本项目的模型推理、语音合成、角色与记忆都无从谈起
+
+## 灵感来源
+
+本项目参考了 Sakura 官方自带的可选插件
+[`sakura_mobile`（手机聊天）](https://github.com/Rvosy/sakura/tree/main/plugins/optional/sakura_mobile)
+（作者 **pa1n9**）做成，沿用了它验证过的 `sakura.host.mobile` 聊天链路与
+`sakura.host.artifacts` 图片传递方式，并在此基础上增加了立绘与语气表情、
+语音播放、桌面悬浮窗与圆形小球。
+
+## 角色资源
+
+角色「夜乃桜（Sakura）」及相关**立绘、语音、角色卡的版权属于其原作者**。
+
+本仓库**不包含、也不分发**任何角色资源 —— 角色由使用者在自己的
+Sakura 里导入，本项目只是显示它。
+
+## 商标与名称
+
+本项目名称中的 "Sakura" 仅用于说明它是哪个项目的扩展，
+不代表任何商标授权或官方认可。
