@@ -557,7 +557,7 @@ function installOverlayGestures() {
      * 按下就给出即时反馈 —— 不等松手。
      *
      *   按在人物本体  -> 轻微放大（body.pressing），做出「点到了」的体感
-     *   按在透明处    -> 立绘变半透明并让出桌面（body.pass-through）
+     * 按在透明处不做任何反馈。
      *
      * 透明处那一路会立刻把窗口设为不可触摸，所以底下的桌面图标**在按住期间**
      * 就能用另一根手指点到（松开第一根手指即恢复）。
@@ -632,12 +632,10 @@ function installOverlayGestures() {
   };
   target.addEventListener('touchend', (event) => {
     /*
-     * 只有**所有**手指都抬起才收尾。
+     * 只有**所有**手指都抬起才收尾，多指期间不拖动。
      *
-     * 原来一抬手就 end() → clearPressFeedback() → 立刻恢复可触摸，
-     * 而这时第二根手指往往还按在桌面上 —— 窗口一把抓回来，
-     * 第二根手指就从「点图标」变成了「拖动立绘」。
-     * 这正是用户反馈的「二指点不到图标 / 立绘乱走」。
+     * 多指时若只用第一根手指的坐标算位移，第二根手指移动会算出巨大的
+     * 跳变，把立绘甩出去。所以多指期间直接不处理拖动。
      */
     if (event.touches && event.touches.length > 0) {
       event.preventDefault();
@@ -699,10 +697,7 @@ function installOverlayGestures() {
 const PRESS_FEEDBACK_KEY = 'sakura.remote.pressFeedback';
 /** 默认开启：这是「点到了」的主要体感来源。 */
 const PRESS_FEEDBACK_DEFAULT = true;
-/** 穿透态的最长持续时间（毫秒）。松手会立刻恢复，这只是防止卡住的兜底。 */
-const PASS_THROUGH_MAX_MS = 6000;
 
-let passThroughTimer = 0;
 let pressingActive = false;
 
 /** 按下反馈是否开启。 */
@@ -756,8 +751,6 @@ function applyPortraitTransform() {
   let factor = 1;
   if (document.body.classList.contains('pressing')) {
     factor = 1 + PRESS_LIFT;
-  } else if (document.body.classList.contains('pass-through')) {
-    factor = 1 - PASS_SHRINK;
   }
   /*
    * 居中方式两种模式不同，不能一律加 translateX(-50%)：
@@ -772,51 +765,31 @@ function applyPortraitTransform() {
 
 /** 按下时放大多少（1.008 的量级，手机上不再明显跳动）。 */
 const PRESS_LIFT = 0.008;
-/** 让位时缩小多少。 */
-const PASS_SHRINK = 0.03;
 
 function pressFeedbackAt(x, y) {
   if (!el.body) {
     el.body = document.body;
   }
-  const alpha = portraitAlphaAt(x, y);
-  if (alpha >= 16) {
-    if (pressFeedbackEnabled()) {
-      el.body.classList.add('pressing');
-      pressingActive = true;
-      applyPortraitTransform();
-    }
+  // 只在按到人物本体时给放大反馈；按在透明处什么都不做
+  //（以前这里会让位给桌面，那套穿透机制已整个去掉）
+  if (portraitAlphaAt(x, y) < 16) {
     return;
   }
-  // 透明处：让位给桌面
-  el.body.classList.add('pass-through');
-  applyPortraitTransform();
-  try {
-    nativeBridge().setTouchable(false);
-  } catch (error) { /* 忽略 */ }
-  // 兜底：万一收不到 touchend（手势被系统打断），别一直停在穿透态
-  clearTimeout(passThroughTimer);
-  passThroughTimer = setTimeout(clearPressFeedback,
-    window.__petRestoreMs || PASS_THROUGH_MAX_MS);
+  if (pressFeedbackEnabled()) {
+    el.body.classList.add('pressing');
+    pressingActive = true;
+    applyPortraitTransform();
+  }
 }
 
-/** 松手（或手势被打断）时恢复原样。 */
+/** 松手（或手势被打断）时撤销按下的放大反馈。 */
 function clearPressFeedback() {
-  clearTimeout(passThroughTimer);
-  passThroughTimer = 0;
-  const body = el.body || document.body;
-  const wasPassThrough = body.classList.contains('pass-through');
-  body.classList.remove('pass-through');
-  if (pressingActive) {
-    body.classList.remove('pressing');
-    pressingActive = false;
+  if (!pressingActive) {
+    return;
   }
+  pressingActive = false;
+  (el.body || document.body).classList.remove('pressing');
   applyPortraitTransform();   // 松手立刻复原
-  if (wasPassThrough) {
-    try {
-      nativeBridge().setTouchable(true);
-    } catch (error) { /* 忽略 */ }
-  }
 }
 
 /**
@@ -964,23 +937,18 @@ function closeMediaMenu() {
   setMediaMenuOpen(false);
 }
 
-/* ---------- 点击穿透（透明处让给桌面）----------
+/* ---------- 立绘上的轻点与拖动 ----------
  *
- * 目标：点立绘的透明区域应该点到**桌面图标**，而不是被悬浮窗吃掉。
+ * 需要区分三种手势：
+ *   轻点人物本体  → 收放对话框
+ *   按住人物本体  → 轻微放大（体感反馈，设置里可关）
+ *   拖动          → 移动窗口（长按 5 秒则是打开设置）
  *
- * 原理：悬浮窗靠 WindowManager 的 FLAG_NOT_TOUCHABLE 决定整窗是否接收触摸
- *（原生侧方法 SakuraNative.setTouchable）。所以做法是：
- *   轻点在非交互区域 → 短暂设成不可触摸 → 这一下落到桌面 → 稍后恢复。
- *
- * 之前完全没生效的原因：原生能力早就写好了，但 **JS 侧从来没有调用过
- * setTouchable**（全文件搜不到一处调用）。
- *
- * 两个必须注意的点：
- *   1. 恢复触摸的定时器一定要能兜底。窗口一旦停留在「不可触摸」状态，
- *      网页就再也收不到事件，等于彻底失去控制 —— 所以恢复逻辑写成
- *      只依赖 setTimeout（不依赖任何后续事件）。
- *   2. 不用 click 事件判断，用 pointerdown + 位移阈值。
- *      拖动窗口（长按后移动）也会触发 pointerdown，必须把拖拽排除掉。
+ * 曾经还有第四种：点透明处把这一下让给桌面图标。那套机制**已整个去掉** ——
+ * 它依赖 WindowManager 的 FLAG_NOT_TOUCHABLE，而 Android 在手势开始时就读定了
+ * 触摸归属，导致「点一下就穿过去」根本做不到，只能退化成
+ * 「按住 + 另一根手指」这种非常规操作，还容易误触、甚至把窗口卡在点不动的状态。
+ * 详见 README 的已知限制。
  */
 
 /** 记录指针按下的位置，用来区分「轻点」和「拖动」。 */
@@ -1071,89 +1039,45 @@ function onPortraitTap(x, y, targetEl) {
   }
 }
 
+/**
+ * 立绘上的轻点处理。
+ *
+ * 这里**只做一件事**：点在人物本体上时收放对话框。
+ *
+ * 原来还带一套「点击穿透到桌面」的机制（按住透明处 → 窗口让位 →
+ * 另一根手指点桌面图标），但它依赖 Android 的 FLAG_NOT_TOUCHABLE，
+ * 而系统在手势开始时就读定了触摸归属，导致体验一直不理想：
+ * 用户得记住「按住 + 另一根手指」这种非常规操作，还容易误触。
+ * 权衡之后**整个去掉**，换来的好处是：
+ *   - 立绘永远不会突然变半透明
+ *   - 不会出现「点不动」的状态（那个状态需要兜底定时器来救）
+ *   - 少一条跨 JS/原生的状态链路，闪烁和时序问题的来源也少了
+ *
+ * 如果以后还想要桌面图标可点，正确做法是在悬浮窗上加一个「暂时让位」
+ * 按钮（整窗隐藏几秒），而不是靠透明区判定 —— 参见 README 的已知限制。
+ */
 function installClickThrough() {
-  const native = nativeBridge();
-  if (!native || typeof native.setTouchable !== 'function') return;
+  /** 点在人物本体上（alpha 足够高）才算「点到角色」。 */
+  const ALPHA_MIN = 16;
 
-  const ALPHA_MIN = 16;    // 低于这个 alpha 视为「透明」
+  /** 这些容器里的点击交给控件自己处理，不要当成「点到立绘」。 */
+  const CLICK_THROUGH_KEEP = [
+    '#composer', '#msgNav', '#configPanel', '#topbar', '#bubbles',
+    '#mediaPanel', '#miniBar', '#hint', '#form', 'button', 'input',
+    'textarea', 'select', 'label', 'a'
+  ];
 
-  /*
-   * 这里不再有「按住多久」的概念。
-   *
-   * Android 的一点行为要注意：FLAG_NOT_TOUCHABLE 是**在手势开始时**读定的，
-   * 中途改它不会让已经开始的这一下重新派发到下层窗口 —— 只会让这一下消失。
-   * 所以「点一下透明处就穿过去」做不到。
-   *
-   * 现在的做法是**按住期间一直让位**（见 pressFeedbackAt）：
-   * 按住时窗口持续不可触摸，这段时间用另一根手指就能点到桌面图标，
-   * 松开第一根手指立刻恢复。这是 Android 上唯一真正可用的穿透方式。
-   */
-
-  let restoreTimer = 0;
-
-  // 排查用：记录每一次穿透尝试。原生桥是 Java 注入对象，
-  // 没法从 JS 侧包裹它的方法做探针，所以进度只能记在这里。
-  window.__petPassLog = [];
-
-  function setTouchable(value) {
-    window.__petPassLog.push({ at: Date.now(), step: 'setTouchable', v: !!value });
-    if (window.__petPassLog.length > 40) window.__petPassLog.shift();
-    try {
-      native.setTouchable(value);
-    } catch (error) {
-      window.__petPassLog.push({ at: Date.now(), step: 'error', msg: String(error) });
-    }
-  }
-
-  function restoreTouchable() {
-    clearTimeout(restoreTimer);
-    restoreTimer = 0;
-    setTouchable(true);
-  }
-
-  // 兜底：万一上面那条路径出问题，周期性地把触摸恢复回来，
-  // 保证窗口不会永久卡在「点不动」的状态。
-  setInterval(() => {
-    if (!restoreTimer) setTouchable(true);
-  }, 2000);
-
-  /**
-   * 立绘上的轻点统一走这里，不再由 pointerup 与手势两套逻辑各判一次
-   * （两套都判会出现「同一个轻点被处理两次」或「两边互相抢先」）。
-   *
-   * 判定只有两步：
-   *   1. 落在交互控件上（对话框、输入框、按钮、配置页）→ 什么都不做
-   *   2. 立绘透明处 → 进入穿透态；人物本体 → 收放对话框
-   */
-  /**
-   * 松手后的「轻点」处理。
-   *
-   * 现在只负责收放对话框 —— 透明处的穿透已经改成**按住期间生效**
-   * （见 pressFeedbackAt），比原来「点一下解锁、再点一下才穿过去」直观得多：
-   * 按住不动就已经让出桌面了，松开即恢复。
-   *
-   * 所以这里不再调用旧的 passThroughOnce，避免两套机制互相干扰。
-   */
   function handlePortraitTap(x, y, targetEl) {
-    if (!isOverlayPage()) return;
     const target = targetEl || null;
-    if (target && target instanceof Element && target.closest(CLICK_THROUGH_KEEP)) {
+    if (target && target instanceof Element && target.closest(CLICK_THROUGH_KEEP.join(','))) {
       return;   // 交互控件，交给它自己处理
     }
-    const alpha = portraitAlphaAt(x, y);
-    if (alpha >= ALPHA_MIN) {
-      window.__petPassLog.push({ at: Date.now(), step: 'tap-opaque', alpha: alpha });
+    if (portraitAlphaAt(x, y) >= ALPHA_MIN) {
       toggleBubbleByTap();
     }
-    // 透明处的轻点不做额外处理：按住时已经让位，松开已恢复
   }
 
   window.__petOnPortraitTap = handlePortraitTap;
-
-  // 页面隐藏时一定要恢复，否则回到前台就点不动了
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) restoreTouchable();
-  });
 }
 
 /**
@@ -3613,7 +3537,7 @@ async function boot() {
   if (document.body.classList.contains('overlay-mode')) {
     installOverlayGestures();
     installContentWidthSync();
-    // 点透明处穿透给桌面（需要原生 setTouchable）
+    // 立绘上的轻点：点在人物本体上收放对话框
     installPointerHistory();
     installClickThrough();
     installMiniBar();

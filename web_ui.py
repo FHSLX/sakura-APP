@@ -183,22 +183,12 @@ _PAGE = """<!doctype html>
           <span>日文原文</span>
         </label>
         <div class="settingHint">两个都关掉时会自动保留日文原文，避免气泡空白。</div>
-        <div class="settingHint">
-          <b>想让点击穿透到桌面图标</b>：按住立绘的<b>透明处</b>不要松手，
-          这时立绘会变半透明、悬浮窗暂时让位 ——
-          用<b>另一根手指</b>就能点到桌面图标，松开第一根手指即恢复。
-          <br>
-          说明：Android 在手势开始时就读定了触摸归属，所以「点一下就穿过去」无法实现，
-          只能靠「按住让位 + 另一根手指」。
-        </div>
-
         <label class="switchRow" for="pressFeedbackToggle">
           <input id="pressFeedbackToggle" type="checkbox">
           <span>按住立绘时放大一点点</span>
         </label>
         <div class="settingHint">
-          按住角色本体时的体感反馈。关掉后按下不再放大。
-          按住**透明处**永远会让出桌面（立绘变半透明），那是穿透功能本身，不受这个开关影响。
+          按住角色本体时的体感反馈，关掉后按下不再放大。
         </div>
 
         <label class="switchRow" for="autoScrollToggle">
