@@ -84,6 +84,7 @@ const el = {
   miniConfigButton: document.getElementById('miniConfigButton'),
   saveState: document.getElementById('saveState'),
   saveAllButton: document.getElementById('saveAllButton'),
+  pressFeedbackToggle: document.getElementById('pressFeedbackToggle'),
   screenPermButton: document.getElementById('screenPermButton'),
   screenPermHint: document.getElementById('screenPermHint'),
   bubbleHideRange: document.getElementById('bubbleHideRange'),
@@ -168,6 +169,8 @@ const state = {
    * 整个页面都起不来）。数值需与 BUBBLE_HIDE_DEFAULT 保持一致。
    */
   bubbleHideSec: 12,
+  /** 按下立绘时是否放大一点点（设置里可关）。 */
+  pressFeedback: true,
 };
 
 const PORTRAIT_SCALE_KEY = 'sakura.remote.portraitScale';
@@ -476,6 +479,7 @@ function installOverlayGestures() {
   let holding = false;
   let dragging = false;
   let longPressed = false;     // 长按已触发开设置，抬手时就不再算轻点
+  let multiTouch = false;      // 本次手势是否出现了多指（让位穿透时会出现）
   let lastX = 0;
   let lastY = 0;
   let holdTimer = 0;
@@ -524,7 +528,22 @@ function installOverlayGestures() {
   }
 
   target.addEventListener('touchstart', (event) => {
-    if (event.touches.length !== 1) return;
+    /*
+     * 已经有一根手指按着时（touches.length > 1），什么都不要做。
+     *
+     * 这里非常关键：让位状态下用户会用**第二根手指**去点桌面，
+     * 而第二根手指落在屏幕上时，这个窗口可能已经被重新判定为可触摸
+     *（比如第一根手指刚好抬了一下）—— 那样第二根手指就会变成「拖动立绘」，
+     * 用户看到的就是「想去点图标，结果立绘乱走」。
+     * 所以我们只认第一根手指建立的手势，多指期间一律不重新开始。
+     */
+    if (event.touches.length !== 1) {
+      multiTouch = true;
+      return;
+    }
+    if (holding) {
+      return;   // 已经在手势中，不要用新手指的位置重置起点
+    }
     const touch = event.touches[0];
     holding = true;
     dragging = false;
@@ -534,11 +553,22 @@ function installOverlayGestures() {
     lastX = startX;
     lastY = startY;
     clearHold();
+    /*
+     * 按下就给出即时反馈 —— 不等松手。
+     *
+     *   按在人物本体  -> 轻微放大（body.pressing），做出「点到了」的体感
+     *   按在透明处    -> 立绘变半透明并让出桌面（body.pass-through）
+     *
+     * 透明处那一路会立刻把窗口设为不可触摸，所以底下的桌面图标**在按住期间**
+     * 就能用另一根手指点到（松开第一根手指即恢复）。
+     */
+    pressFeedbackAt(touch.clientX, touch.clientY);
     holdTimer = setTimeout(() => {
       if (!dragging) {
         // 静置满 5 秒：开设置
         holding = false;
         longPressed = true;
+        clearPressFeedback();
         openConfig(true);
       }
     }, HOLD_MS);
@@ -559,6 +589,7 @@ function installOverlayGestures() {
   }, { passive: false });
 
   target.addEventListener('touchmove', (event) => {
+    // 多指期间不拖动：第二根手指是去点桌面的，不该带动立绘
     if (!holding || event.touches.length !== 1) return;
     const touch = event.touches[0];
     const dx = touch.clientX - lastX;
@@ -569,6 +600,7 @@ function installOverlayGestures() {
       dragging = true;
       clearHold();          // 开始拖动就不再触发开设置
       // 拖动期间关掉滤镜与过渡（见 app.css 的 body.dragging）
+      clearPressFeedback();  // 拖动不是「按住」，撤掉按下反馈
       document.body.classList.add('dragging');
     }
     lastX = touch.clientX;
@@ -592,12 +624,38 @@ function installOverlayGestures() {
     holding = false;
     dragging = false;
     document.body.classList.remove('dragging');
+    // 松手即恢复原样：半透明/放大都撤掉，桌面让位也收回
+    clearPressFeedback();
     clearHold();
     // 位移已经逐次直接下发了，这里不需要再补发
     if (isTap) onPortraitTap(startX, startY, target);
   };
-  target.addEventListener('touchend', (event) => { end(false); event.preventDefault(); }, { passive: false });
-  target.addEventListener('touchcancel', (event) => { end(true); event.preventDefault(); }, { passive: false });
+  target.addEventListener('touchend', (event) => {
+    /*
+     * 只有**所有**手指都抬起才收尾。
+     *
+     * 原来一抬手就 end() → clearPressFeedback() → 立刻恢复可触摸，
+     * 而这时第二根手指往往还按在桌面上 —— 窗口一把抓回来，
+     * 第二根手指就从「点图标」变成了「拖动立绘」。
+     * 这正是用户反馈的「二指点不到图标 / 立绘乱走」。
+     */
+    if (event.touches && event.touches.length > 0) {
+      event.preventDefault();
+      return;   // 还有手指按着，保持让位
+    }
+    multiTouch = false;
+    end(false);
+    event.preventDefault();
+  }, { passive: false });
+  target.addEventListener('touchcancel', (event) => {
+    if (event.touches && event.touches.length > 0) {
+      event.preventDefault();
+      return;
+    }
+    multiTouch = false;
+    end(true);
+    event.preventDefault();
+  }, { passive: false });
 
   // 鼠标也支持一份，方便在电脑浏览器里调试
   target.addEventListener('mousedown', (event) => {
@@ -635,6 +693,89 @@ function installOverlayGestures() {
     } catch (error) { /* 忽略 */ }
   });
   window.addEventListener('mouseup', () => end(false));
+}
+
+/** 按下反馈（立绘放大）的开关存储键。 */
+const PRESS_FEEDBACK_KEY = 'sakura.remote.pressFeedback';
+/** 默认开启：这是「点到了」的主要体感来源。 */
+const PRESS_FEEDBACK_DEFAULT = true;
+/** 穿透态的最长持续时间（毫秒）。松手会立刻恢复，这只是防止卡住的兜底。 */
+const PASS_THROUGH_MAX_MS = 6000;
+
+let passThroughTimer = 0;
+let pressingActive = false;
+
+/** 按下反馈是否开启。 */
+function pressFeedbackEnabled() {
+  return readBool(PRESS_FEEDBACK_KEY, PRESS_FEEDBACK_DEFAULT);
+}
+
+/** 设置里改这个开关时调用。 */
+function setPressFeedbackEnabled(enabled, options = {}) {
+  state.pressFeedback = !!enabled;
+  if (el.pressFeedbackToggle) el.pressFeedbackToggle.checked = state.pressFeedback;
+  if (options.persist !== false) {
+    writeBool(PRESS_FEEDBACK_KEY, state.pressFeedback);
+    updateSaveState();
+  }
+  // 关掉时立刻撤掉正在生效的放大
+  if (!state.pressFeedback) {
+    document.body.classList.remove('pressing');
+    pressingActive = false;
+  }
+}
+
+/**
+ * 按下立绘时的即时反馈。
+ *
+ * 按在**人物本体**上：加 body.pressing，立绘轻微放大（可在设置里关掉）。
+ * 按在**透明处**：进入穿透态 —— 立绘变半透明，同时把窗口设为不可触摸，
+ *   让底下的桌面图标可以直接点。松手立刻恢复。
+ *
+ * 用 clientX/clientY 在立绘的 alpha 上采样来判断按到了哪里 ——
+ * 这正是「按 PNG 轮廓做自适应边界」在**手势层面**能实现的部分：
+ * 窗口本身仍然只能整块接收触摸（Android 只支持矩形区域），
+ * 但按下的那一刻我们能精确知道手指在不在人物身上，并据此决定给什么反馈。
+ */
+function pressFeedbackAt(x, y) {
+  if (!el.body) {
+    el.body = document.body;
+  }
+  const alpha = portraitAlphaAt(x, y);
+  if (alpha >= 16) {
+    if (pressFeedbackEnabled()) {
+      el.body.classList.add('pressing');
+      pressingActive = true;
+    }
+    return;
+  }
+  // 透明处：让位给桌面
+  el.body.classList.add('pass-through');
+  try {
+    nativeBridge().setTouchable(false);
+  } catch (error) { /* 忽略 */ }
+  // 兜底：万一收不到 touchend（手势被系统打断），别一直停在穿透态
+  clearTimeout(passThroughTimer);
+  passThroughTimer = setTimeout(clearPressFeedback,
+    window.__petRestoreMs || PASS_THROUGH_MAX_MS);
+}
+
+/** 松手（或手势被打断）时恢复原样。 */
+function clearPressFeedback() {
+  clearTimeout(passThroughTimer);
+  passThroughTimer = 0;
+  const body = el.body || document.body;
+  const wasPassThrough = body.classList.contains('pass-through');
+  body.classList.remove('pass-through');
+  if (pressingActive) {
+    body.classList.remove('pressing');
+    pressingActive = false;
+  }
+  if (wasPassThrough) {
+    try {
+      nativeBridge().setTouchable(true);
+    } catch (error) { /* 忽略 */ }
+  }
 }
 
 /**
@@ -896,21 +1037,18 @@ function installClickThrough() {
   const ALPHA_MIN = 16;    // 低于这个 alpha 视为「透明」
 
   /*
-   * 穿透态的持续时长。
+   * 这里不再有「按住多久」的概念。
    *
-   * 不是「让当前这一下穿过去」—— Android 在手势开始时就读定了
-   * FLAG_NOT_TOUCHABLE，中途改它只会让这一下消失（详见 passThroughOnce 的说明）。
-   * 这段时长是留给用户**再点一下**的窗口：那一下会真正落到底下的桌面图标。
+   * Android 的一点行为要注意：FLAG_NOT_TOUCHABLE 是**在手势开始时**读定的，
+   * 中途改它不会让已经开始的这一下重新派发到下层窗口 —— 只会让这一下消失。
+   * 所以「点一下透明处就穿过去」做不到。
    *
-   * 取 1300ms：够从容地点第二下，又不会久到让用户以为窗口卡住了。
-   * 留了 window.__petRestoreMs 覆盖口子方便调试时观察状态。
+   * 现在的做法是**按住期间一直让位**（见 pressFeedbackAt）：
+   * 按住时窗口持续不可触摸，这段时间用另一根手指就能点到桌面图标，
+   * 松开第一根手指立刻恢复。这是 Android 上唯一真正可用的穿透方式。
    */
-  const PASSTHROUGH_MS = 1300;
 
   let restoreTimer = 0;
-  let lastPassAt = 0;
-  /** 当前是否处于穿透态（用于安全兜底与调试）。 */
-  let passthroughArmed = false;
 
   // 排查用：记录每一次穿透尝试。原生桥是 Java 注入对象，
   // 没法从 JS 侧包裹它的方法做探针，所以进度只能记在这里。
@@ -929,38 +1067,7 @@ function installClickThrough() {
   function restoreTouchable() {
     clearTimeout(restoreTimer);
     restoreTimer = 0;
-    passthroughArmed = false;
     setTouchable(true);
-  }
-
-  /**
-   * 进入「穿透态」。
-   *
-   * 这里有个容易想错的地方，值得写清楚：
-   *
-   * 原设计以为「setTouchable(false) → 这一下就落到桌面了」，
-   * 实际上 Android 是在**手势开始时**读一次 FLAG_NOT_TOUCHABLE 决定事件
-   * 归谁，中途改这个标志**不会**把已经开始的这一下重新派发给下层窗口 ——
-   * 它只是让当前这一下从此收不到后续事件，然后消失。
-   * 用户看到的就是「点透明处毫无反应」。
-   *
-   * 所以正确做法是让穿透态**持续一小段时间**：这次点击被吃掉（本来也点不到
-   * 桌面），但紧接着的下一次点击会真正落到底下的桌面图标上。
-   * 这段时间就是给用户「再点一下」的窗口。
-   */
-  function passThroughOnce() {
-    const now = Date.now();
-    if (now - lastPassAt < 300) {
-      window.__petPassLog.push({ at: now, step: 'debounced' });
-      return;
-    }
-    lastPassAt = now;
-    window.__petPassLog.push({ at: now, step: 'arm-passthrough' });
-    setTouchable(false);
-    passthroughArmed = true;
-    // 只靠定时器恢复 —— 穿透期间收不到任何网页事件，不能依赖后续事件
-    clearTimeout(restoreTimer);
-    restoreTimer = setTimeout(restoreTouchable, window.__petRestoreMs || PASSTHROUGH_MS);
   }
 
   // 兜底：万一上面那条路径出问题，周期性地把触摸恢复回来，
@@ -977,6 +1084,15 @@ function installClickThrough() {
    *   1. 落在交互控件上（对话框、输入框、按钮、配置页）→ 什么都不做
    *   2. 立绘透明处 → 进入穿透态；人物本体 → 收放对话框
    */
+  /**
+   * 松手后的「轻点」处理。
+   *
+   * 现在只负责收放对话框 —— 透明处的穿透已经改成**按住期间生效**
+   * （见 pressFeedbackAt），比原来「点一下解锁、再点一下才穿过去」直观得多：
+   * 按住不动就已经让出桌面了，松开即恢复。
+   *
+   * 所以这里不再调用旧的 passThroughOnce，避免两套机制互相干扰。
+   */
   function handlePortraitTap(x, y, targetEl) {
     if (!isOverlayPage()) return;
     const target = targetEl || null;
@@ -985,12 +1101,10 @@ function installClickThrough() {
     }
     const alpha = portraitAlphaAt(x, y);
     if (alpha >= ALPHA_MIN) {
-      window.__petPassLog.push({ at: Date.now(), step: 'opaque', alpha: alpha });
+      window.__petPassLog.push({ at: Date.now(), step: 'tap-opaque', alpha: alpha });
       toggleBubbleByTap();
-      return;
     }
-    window.__petPassLog.push({ at: Date.now(), step: 'transparent', alpha: alpha });
-    passThroughOnce();
+    // 透明处的轻点不做额外处理：按住时已经让位，松开已恢复
   }
 
   window.__petOnPortraitTap = handlePortraitTap;
@@ -1562,6 +1676,7 @@ function loadDisplayPrefs() {
   );
   applyPortraitFloat(readBool(FLOAT_KEY, true), { persist: false });
   applyBubbleHideDelay(stored(BUBBLE_HIDE_DELAY_KEY, BUBBLE_HIDE_DEFAULT), { persist: false });
+  setPressFeedbackEnabled(readBool(PRESS_FEEDBACK_KEY, PRESS_FEEDBACK_DEFAULT), { persist: false });
   updateSaveState._loading = false;
   setSaveState('设置会自动保存', false);
 }
@@ -2335,6 +2450,21 @@ function applyMessageNav(options = {}) {
     }
     el.msgBody.scrollTop = 0;
   }
+  /*
+   * 短回复让卡片保持紧凑，长回复才放开宽度。
+   *
+   * 卡片宽度现在是 fit-content（见 app.css），所以「嗯」不会撑成大框。
+   * 但纯 fit-content 对长文本会一直往宽里长到上限，再靠换行 —— 与原来一样；
+   * 所以这里只负责在两档之间切换：短文本紧凑、长文本占满可用宽度。
+   * 阈值取 24 个字：大约是一行中文的容量，超过就该换行了。
+   */
+  const CARD_WIDE_CHARS = 24;
+  if (el.msgNav) {
+    const body = el.msgBody ? el.msgBody.textContent : '';
+    const len = body ? body.length : 0;
+    el.msgNav.classList.toggle('wide', len > CARD_WIDE_CHARS);
+  }
+
   if (el.msgName) {
     if (!row) {
       el.msgName.textContent = '';
@@ -3155,6 +3285,12 @@ if (el.floatToggle) {
 
 if (el.saveAllButton) {
   el.saveAllButton.addEventListener('click', saveAllDisplaySettings);
+}
+
+if (el.pressFeedbackToggle) {
+  el.pressFeedbackToggle.addEventListener('change', () => {
+    setPressFeedbackEnabled(el.pressFeedbackToggle.checked);
+  });
 }
 
 /**

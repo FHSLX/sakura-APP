@@ -264,7 +264,19 @@ body.overlay-mode #msgNav {
   gap: 4px;
   flex: 0 0 auto;
   margin: 0 auto;
-  width: var(--pet-content-w, 100%);
+  /*
+   * 宽度按文字内容自适应，不再固定撑满。
+   *
+   * 原来写死 width: var(--pet-content-w)，于是「嗯」这种一个字的回复
+   * 也会被拉成和屏幕一样宽的大方框，很突兀。
+   * 改成 fit-content：短的回复就是一个紧凑小框，长的回复才展开。
+   *
+   * 上限仍然是 --pet-content-w 且再夹 100%，所以长文本不会溢出窗口；
+   * 页面里再按字数给 .wide 类放宽上限，供需要换行的长回复使用。
+   */
+  width: fit-content;
+  min-width: 132px;
+  /* 短回复时 fit-content 就够了；长回复由页面加 .wide 放开上限去换行。 */
   /* min(..., 100%)：--pet-content-w 是按 screen.width 设定的目标宽度，
      视口还没长到那么宽时（启动瞬间）会溢出，用 100% 兜住。
      这是宽度侧唯一的兜底，不会再造成收缩循环 —— 窗口宽度只由 JS 按 screen 申请。 */
@@ -293,6 +305,15 @@ body.overlay-mode #msgNav {
   max-height: calc(100dvh - var(--pet-avail-h, 0px) - var(--pet-composer-h, 70px));
   height: var(--pet-nav-h, 220px);
   overflow: hidden;
+}
+
+/*
+ * 长回复：放开宽度上限，让文字正常换行。
+ * 阈值由页面按字数判断（见 applyMessageNav 里的 CARD_WIDE_CHARS）。
+ */
+body.overlay-mode #msgNav.wide {
+  width: min(var(--pet-content-w, 100%), 100%);
+  max-width: min(var(--pet-content-w, 100%), 100%);
 }
 
 body.overlay-mode #msgNav.hidden { display: none; }
@@ -471,6 +492,46 @@ body.overlay-mode #mediaPanel,
 body.overlay-mode #bubbles {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
+}
+
+/* ============================================================
+ * 按住立绘的两个即时反馈
+ *
+ * 1) body.pass-through —— 按在**透明处**时进入
+ *    整窗暂时不接收触摸，底下的桌面图标可以直接点。
+ *    立绘同时变半透明并轻微缩小，作为「现在点到的是桌面」的提示 ——
+ *    没有这个提示的话，穿透期间网页收不到任何事件，画面毫无变化，
+ *    用户会以为卡住了，也不知道现在能点桌面。
+ *    松开手指立刻恢复。
+ *
+ * 2) body.pressing —— 按在**人物本体**上时进入
+ *    立绘轻微放大，做出「点到了」的体感反馈，松开复原。
+ *    这个效果可以在设置里关掉（见 setPressFeedback）。
+ *
+ * 两者互斥：一次按下只会有其中一个。
+ * ============================================================ */
+body.overlay-mode.pass-through #stage {
+  opacity: 0.45;
+  transition: opacity 160ms ease;
+}
+
+body.overlay-mode.pass-through #portraitWrap {
+  transform: scale(0.97);
+}
+
+/*
+ * 按到本体：放大一点点，作为「点到了」的体感反馈。
+ *
+ * 幅度取 1.008 —— 1.02 在手机上看太夸张了（立绘会明显一跳）。
+ * 这个量级刚好能感觉到「有反应」，又不会让画面跳动。
+ */
+body.overlay-mode.pressing #portraitWrap {
+  transform: scale(1.008);
+}
+
+/* 透明态下不要有任何交互反馈，否则会误导用户以为还能点它 */
+body.overlay-mode.pass-through #portraitWrap {
+  pointer-events: none;
 }
 
 /* ============================================================
