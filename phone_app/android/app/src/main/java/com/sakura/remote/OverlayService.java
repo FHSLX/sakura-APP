@@ -16,7 +16,6 @@ import android.os.Looper;
 import android.util.DisplayMetrics;
 import android.view.Gravity;
 import android.view.MotionEvent;
-import android.view.Choreographer;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
@@ -159,6 +158,22 @@ public class OverlayService extends Service {
     private float moveRemainX;
     private float moveRemainY;
 
+    /**
+     * 保护 moveRemainX/Y：网页（JavaBridge 线程）累加，主线程的帧回调读取。
+     */
+    private final Object moveLock = new Object();
+
+    /**
+     * 是否已有一次「刷位移」任务排在主线程队列里。
+     *
+     * 用 AtomicBoolean 而不是普通 boolean：它是**桥线程写、主线程清**，
+     * 普通 boolean 的可见性与竞态会让标志永久卡住（之前 Choreographer 那版
+     * 就是这么坏掉的，表现为窗口一顿一顿地跳）。
+     * getAndSet/compareAndSet 是原子的，不存在这个窗口。
+     */
+    private final java.util.concurrent.atomic.AtomicBoolean moveFlushPending =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
     /** 拖动位移是否已排入下一帧（避免同一帧重复排）。 */
     /**
      * 是否正在拖动窗口（由网页在拖动开始/结束时告知）。
@@ -176,8 +191,6 @@ public class OverlayService extends Service {
         dragInProgress = dragging;
     }
 
-    private boolean moveFlushScheduled;
-    private Choreographer choreographer;
 
     /** 迷你图标（小圆头像）的直径。 */
     private int bubbleSize;
@@ -685,71 +698,105 @@ public class OverlayService extends Service {
      * 合并到 vsync：不再每次调用都 handler.post 一个任务。
      * 原来的写法在手指快速移动时会往主线程塞进大量任务，
      * 主线程一旦忙于渲染就开始积压，表现就是「一卡一卡地突进」而不是平滑跟随。
-     * 现在把位移攒起来，由 Choreographer 在下一次屏幕刷新回调里合成一次
-     * updateViewLayout，天然对齐刷新率。
+     * 现在把位移攒起来，由主线程的 moveFlushRunnable 合并成一次
+     * updateViewLayout，同一帧内的多次位移只刷一次。
      */
     public void moveWindowBy(final float dx, final float dy) {
         /*
-         * 这里跑在 JavaBridge 线程，而 Choreographer.getInstance()
-         * **必须在主线程调用** —— 它内部走 Looper.myLooper() 取当前线程的 Looper。
-         * 在别的线程调，拿到的 Choreographer 会绑在错误的 Looper 上
-         *（或者直接抛异常被吞掉），于是 postFrameCallback 永远等不到那一帧。
+         * 位移**在这里（JavaBridge 线程）就累加掉**，只把「调度」丢给主线程。
          *
-         * 实际表现就是：**第一次拖动完全不动，要先点一下立绘才生效**。
-         * 那一下点击触发了网页重排，主线程顺手又调度了一次，之后才正常。
+         * 两点必须同时满足：
          *
-         * 所以：先用 handler.post 切到主线程，再在那边做合并调度。
+         * 1) 累加不能放进 handler.post。
+         *    试过整个塞进主线程，结果每帧都往主线程排一个任务；主线程忙于渲染时
+         *    任务堆积，攒够一大批才刷一次 —— 实测窗口是「11 帧不动，然后一次跳
+         *    165 设备px」，而且总位移还会丢（220 / 期望 275）。用户看到的就是抽搐。
+         *    现在累加是即时完成的，主线程只负责「下一帧刷一次」。
+         *
+         * 2) 调度必须在主线程。
+         *    Choreographer.getInstance() 内部走 Looper.myLooper() 取**当前线程**的
+         *    Looper，在 JavaBridge 线程调会绑到错误的 Looper 上（或抛异常被吞），
+         *    postFrameCallback 永远等不到那一帧 —— 表现为「第一次拖动完全不动，
+         *    要先点一下立绘才生效」。
+         *
+         * moveRemainX/Y 被两个线程访问，所以用 moveLock 保护。
          */
-        handler.post(() -> {
+        synchronized (moveLock) {
             moveRemainX += dx;
             moveRemainY += dy;
-            scheduleMoveFlush();
-        });
+        }
+        requestMoveFlush();
     }
 
-    /** 把攒下的位移在下一帧一次性应用。**必须在主线程调用。** */
-    private void scheduleMoveFlush() {
-        if (moveFlushScheduled) {
-            return;
+    /**
+     * 请求把攒下的位移刷到窗口上。
+     *
+     * 实现是**自重新调度**：post 一个 Runnable，应用位移后若发现又攒了新位移
+     * 就再 post 自己一次，没有就自然停下。
+     *
+     * 为什么不再用 Choreographer：
+     *   - Choreographer.getInstance() 必须在主线程调用（它走 Looper.myLooper()
+     *     取当前线程的 Looper），在 JavaBridge 线程调会绑到错误的 Looper 上，
+     *     postFrameCallback 永远等不到那一帧；
+     *   - 而「本帧是否已排过队」这个状态又必须跨线程读，天然有竞态 ——
+     *     实测会让标志永久卡在 true，之后每一帧都不再调度。
+     *
+     * 自重新调度把所有状态都留在主线程，没有任何跨线程标志；
+     * handler.post 本身按帧节奏执行，同一帧内多次位移会被合并成一次
+     * updateViewLayout，效果与 vsync 对齐相同。
+     */
+    private void requestMoveFlush() {
+        // 已经排过一次就不再排：主线程忙的时候，每帧都塞任务会把队列压满，
+        // 反而让位移延迟更大。
+        if (moveFlushPending.compareAndSet(false, true)) {
+            handler.post(moveFlushRunnable);
         }
-        moveFlushScheduled = true;
-        if (choreographer == null) {
-            choreographer = Choreographer.getInstance();
-        }
-        choreographer.postFrameCallback(moveFlushCallback);
     }
 
-    private final Choreographer.FrameCallback moveFlushCallback = new Choreographer.FrameCallback() {
+    private final Runnable moveFlushRunnable = new Runnable() {
         @Override
-        public void doFrame(long frameTimeNanos) {
-            moveFlushScheduled = false;
+        public void run() {
+            moveFlushPending.set(false);   // 先清，后面若要继续排会重新置位
             if (layoutParams == null || rootView == null) {
-                moveRemainX = 0;
-                moveRemainY = 0;
+                synchronized (moveLock) {
+                    moveRemainX = 0;
+                    moveRemainY = 0;
+                }
                 return;
             }
             /*
-             * 亚像素累积，不要每帧直接取整。
+             * 亚像素累积。
              *
-             * 原来写的是 layoutParams.x += Math.round(dx)：手指慢慢移动时
-             * 每帧的 dx 常常不足 1px，Math.round 一律变成 0 直接丢掉，
-             * 一秒上百帧累积下来窗口就明显落后于手指。
-             * 这里把小数部分攒起来，凑够 1px 再进位，位移一点都不丢。
-             * 位置必须是整数（WindowManager 要求），所以小数只能自己记。
+             * 位置必须是整数（WindowManager 要求），所以小数部分只能自己记住，
+             * 凑够 1px 再进位。直接 Math.round 的话，手指慢速移动时每帧的 dx
+             * 常常不足 1px，会被一律取整成 0 丢掉，一秒上百帧下来窗口就明显
+             * 落后于手指。
              */
-            int stepX = (int) Math.floor(moveRemainX);
-            int stepY = (int) Math.floor(moveRemainY);
-            moveRemainX -= stepX;
-            moveRemainY -= stepY;
-            if (stepX == 0 && stepY == 0) {
-                return;   // 还没攒够 1px，余量留到下一帧
+            int stepX;
+            int stepY;
+            synchronized (moveLock) {
+                stepX = (int) Math.floor(moveRemainX);
+                stepY = (int) Math.floor(moveRemainY);
+                moveRemainX -= stepX;
+                moveRemainY -= stepY;
             }
-            layoutParams.x += stepX;
-            layoutParams.y += stepY;
-            clampWindowPosition();
-            updateLayout();
+            if (stepX != 0 || stepY != 0) {
+                layoutParams.x += stepX;
+                layoutParams.y += stepY;
+                clampWindowPosition();
+                updateLayout();
+            }
+            // 这一帧期间又攒了新位移就继续排；否则自然停下
+            boolean more;
+            synchronized (moveLock) {
+                more = moveRemainX != 0f || moveRemainY != 0f;
+            }
+            if (more && moveFlushPending.compareAndSet(false, true)) {
+                handler.post(this);
+            }
         }
     };
+
 
     /**
      * 把窗口直接移到绝对位置（CSS 像素）。

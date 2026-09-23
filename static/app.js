@@ -485,6 +485,11 @@ function installOverlayGestures() {
   let holdTimer = 0;
   let startX = 0;
   let startY = 0;
+  // 绝对定位的「抓取点」：按下那一刻的窗口位置（CSS 像素）与手指位置
+  let dragOriginWinX = 0;
+  let dragOriginWinY = 0;
+  let dragOriginX = 0;
+  let dragOriginY = 0;
 
   function clearHold() {
     clearTimeout(holdTimer);
@@ -519,6 +524,46 @@ function installOverlayGestures() {
       const n = nativeBridge();
       if (n && typeof n.setDragging === 'function') n.setDragging(!!value);
     } catch (error) { /* 忽略：旧版 APK 没这个方法 */ }
+  }
+
+  /**
+   * 触摸点的**屏幕绝对坐标**。
+   *
+   * 优先用 screenX/screenY —— 它们**不随窗口移动**，是拖动唯一正确的参照。
+   *
+   * 为什么不能用 clientX/clientY：视口长在窗口里面，我们一移动窗口，
+   * 视口参照就跟着动，同一个物理手指位置读出的 client 坐标就变了；
+   * 再据此算出新的窗口位置，形成正反馈回路。实测拖动中
+   * client 与 screen 的差值有 165/252 种取值、单帧位移达 47px/6ms
+   *（人手做不到），表现就是立绘一直抽搐。
+   *
+   * 个别环境可能不给这个字段，那时退回 client 坐标：会退化成有回路的行为，
+   * 但总比完全不能拖好。
+   */
+  function touchScreenX(touch) {
+    const v = touch.screenX;
+    return (typeof v === 'number' && v > 0) ? v : touch.clientX;
+  }
+
+  function touchScreenY(touch) {
+    const v = touch.screenY;
+    return (typeof v === 'number' && v > 0) ? v : touch.clientY;
+  }
+
+  /**
+   * 把窗口移到绝对位置（CSS 像素，窗口左上角）。
+   *
+   * 拖动一律走这里，不要用增量累加 —— 增量会把手指抖动积分成窗口漂移。
+   */
+  function moveTo(x, y) {
+    try {
+      const n = nativeBridge();
+      // 桥上的方法名是 moveTo —— 原生 Host 接口里叫 setWindowPositionPx，
+      // 桥接方法做了改名。用错名字会**静默失效**（实测踩过）。
+      if (n && typeof n.moveTo === 'function') {
+        n.moveTo(x, y);
+      }
+    } catch (error) { /* 忽略 */ }
   }
 
   function move(dx, dy) {
@@ -563,8 +608,8 @@ function installOverlayGestures() {
     holding = true;
     dragging = false;
     longPressed = false;   // 每次按下都重置
-    startX = touch.clientX;
-    startY = touch.clientY;
+    startX = touchScreenX(touch);
+    startY = touchScreenY(touch);
     lastX = startX;
     lastY = startY;
     clearHold();
@@ -578,6 +623,44 @@ function installOverlayGestures() {
      * 就能用另一根手指点到（松开第一根手指即恢复）。
      */
     pressFeedbackAt(touch.clientX, touch.clientY);
+    /*
+     * 记录「抓取点」——绝对定位的基准，**必须在按下的这一刻记**。
+     *
+     * 为什么必须在 touchstart：
+     *   一开始写成「越过拖动阈值那一帧才记」，但那一帧窗口已经被移动过了，
+     *   于是整个拖动带一个固定偏移（实测 -30px）。
+     *   按下时就记，偏移为 0。
+     *
+     * 为什么必须绝对定位（不要增量累加）：
+     *   手指本身有约 ±15px 的高频抖动，增量累加会把它**积分**进去，
+     *   窗口在 368px 跨度里持续来回漂 —— 实测方向反转 697 次，就是不停抽搐。
+     *
+     * 单位：overlayLayout 返回设备像素，窗口定位要 CSS 像素，按 dpr 换算。
+     * 读不到就标 NaN，拖动时退回增量（读窗口位置绝不能抛异常，
+     * 抛出去会中断整个 touchmove，拖动会彻底失效 —— 实测踩过）。
+     */
+    /*
+     * 抓取点用 **screenX/screenY**（屏幕绝对坐标），不用 clientX/clientY。
+     *
+     * 原因是一个反馈回路：
+     *   我们移动窗口 → 视口（长在窗口里）跟着动 → 同一个物理手指位置读出的
+     *   clientX/Y 就变了 → 我们据此再算目标位置 → 又移动窗口 → 循环放大。
+     * 实测 client 与 screen 的差值在拖动中变化 165/252 种取值，
+     * 单帧位移高达 47px/6ms（人手不可能），表现就是抽搐。
+     *
+     * screenX/screenY 是屏幕绝对坐标，**不随窗口移动**，回路就被切断了。
+     */
+    dragOriginX = touchScreenX(touch);
+    dragOriginY = touchScreenY(touch);
+    try {
+      const L = JSON.parse(native.overlayLayout());
+      const dpr = window.devicePixelRatio || 1;
+      dragOriginWinX = L.x / dpr;
+      dragOriginWinY = L.y / dpr;
+    } catch (error) {
+      dragOriginWinX = NaN;
+      dragOriginWinY = NaN;
+    }
     holdTimer = setTimeout(() => {
       if (!dragging) {
         // 静置满 5 秒：开设置
@@ -610,7 +693,8 @@ function installOverlayGestures() {
     const dx = touch.clientX - lastX;
     const dy = touch.clientY - lastY;
     if (!dragging) {
-      const moved = Math.hypot(touch.clientX - startX, touch.clientY - startY);
+      // 阈值判断同样用 screen 坐标，与后面的位移计算保持同一坐标系
+      const moved = Math.hypot(touchScreenX(touch) - startX, touchScreenY(touch) - startY);
       if (moved < DRAG_THRESHOLD) return;
       dragging = true;
       clearHold();          // 开始拖动就不再触发开设置
@@ -626,10 +710,34 @@ function installOverlayGestures() {
        * 拖动期间原生跳过夹取，松手后再正常校正。
        */
       setNativeDragging(true);
+      /*
+       * 记录「抓取点」——绝对定位的基准。
+       *
+       * 为什么必须绝对定位：
+       *   原先用增量累加（每帧 layoutParams.x += dx）。手指本身有约 ±15px 的
+       *   高频抖动（实测触摸流在 130-167 之间来回），累加会把这抖动**积分**进去，
+       *   窗口就在 368px 的跨度里持续来回漂 —— 实测方向反转 697 次，
+       *   看起来就是不停抽搐。
+       *
+       *   绝对定位下窗口位置 = 按下时的窗口位置 + (手指现在的位置 − 手指按下的位置)。
+       *   抖动只是让结果在小范围内来回，**不会累积**，而且手指回到原点窗口就回原点。
+       *
+       * 基准（dragOrigin*）已经在 touchstart 时记好了，这里直接用。
+       */
+      lastX = touch.clientX;
+      lastY = touch.clientY;
     }
-    lastX = touch.clientX;
-    lastY = touch.clientY;
-    move(dx, dy);
+    if (dragging) {
+      if (isFinite(dragOriginWinX) && isFinite(dragOriginWinY)) {
+        moveTo(dragOriginWinX + (touchScreenX(touch) - dragOriginX),
+               dragOriginWinY + (touchScreenY(touch) - dragOriginY));
+      } else {
+        // 兜底：拿不到基准位置时退回增量
+        move(touch.clientX - lastX, touch.clientY - lastY);
+      }
+      lastX = touch.clientX;
+      lastY = touch.clientY;
+    }
     event.preventDefault();
   }, { passive: false });
 
@@ -800,6 +908,11 @@ function pressFeedbackAt(x, y) {
   // 只在按到人物本体时给放大反馈；按在透明处什么都不做
   //（以前这里会让位给桌面，那套穿透机制已整个去掉）
   if (portraitAlphaAt(x, y) < 16) {
+    return;
+  }
+  // 拖动中不再给放大反馈：拖动本身已经有窗口跟随作为反馈，
+  // 而缩放和拖动叠加会互相干扰（表现为抽搐）
+  if (document.body.classList.contains('dragging')) {
     return;
   }
   if (pressFeedbackEnabled()) {

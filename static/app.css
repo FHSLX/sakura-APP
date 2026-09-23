@@ -529,6 +529,21 @@ body.bubble-mode.dragging #portraitWrap {
   /* 拖动期间停掉呼吸/说话动画：它动的是 --pet-lift 自定义属性，
      CSS 变量不做插值、只能在 0 与 -18px 之间跳变，看起来就是持续闪烁。 */
   animation: none;
+  /*
+   * 拖动期间**中立掉按下反馈**（pressing）。
+   *
+   * 按下时会加 .pressing 让立绘放大，开始拖动时又把它去掉 ——
+   * 如果拖动过程中 .pressing 被重新加上/去掉（比如手势被打断后重来），
+   * 立绘就在「放大 / 复原」之间反复切换，看起来就是一直抽搐。
+   * 拖动本来就有窗口跟随作为反馈，这里让缩放恒等即可。
+   */
+  --pet-press: 0;
+}
+
+/* .pressing 在拖动期间不再影响缩放（上面的 --pet-press: 0 优先，
+   这里再明确一次，避免被更具体的选择器覆盖）。 */
+body.dragging.pressing {
+  --pet-press: 0;
 }
 
 body.overlay-mode.dragging #portrait,
