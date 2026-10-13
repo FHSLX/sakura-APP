@@ -76,6 +76,8 @@ class FakeMobile:
 
     def begin(self, plugin_id, character_id, text, artifact_descriptor=None):
         self._check_owner(plugin_id)
+        if artifact_descriptor:
+            assert isinstance(artifact_descriptor, dict) and set(artifact_descriptor) == {"artifactId", "mediaType", "byteLength"}, "host requires a committed artifact descriptor"
         job_id = f"job-{len(self._jobs) + 1}"
         self._jobs[job_id] = {"character_id": character_id, "text": text}
         self._owners[job_id] = plugin_id
@@ -106,6 +108,26 @@ class FakeMobile:
         self._jobs.pop(job_id, None)
         self._owners.pop(job_id, None)
         return {"accepted": True}
+
+
+class FakeArtifacts:
+    def __init__(self, directory):
+        self.directory = directory
+        self.entries = {}
+
+    def allocate(self, options):
+        self.directory.mkdir(parents=True, exist_ok=True)
+        identifier = "artifact_" + str(len(self.entries) + 1)
+        path = self.directory / (identifier + options["suffix"])
+        self.entries[identifier] = (path, options["mediaType"])
+        return {"artifactId": identifier, "path": str(path)}
+
+    def commit(self, identifier):
+        path, media = self.entries[identifier]
+        return {"artifactId": identifier, "mediaType": media, "byteLength": path.stat().st_size}
+
+    def release(self, identifier):
+        self.entries[identifier][0].unlink(missing_ok=True)
 
 
 class FakeCharacters:
@@ -221,6 +243,7 @@ def main() -> int:
     server = http_server.run_remote_server(
         data_dir,
         mobile_service=FakeMobile(),
+        artifact_service=FakeArtifacts(tmp_dir / "artifacts"),
         character_service=FakeCharacters(),
         tts_service=FakeTTS(tmp_dir, data_dir),
         host="127.0.0.1",
@@ -350,6 +373,11 @@ def main() -> int:
 
         status, image = request(base + uploaded.get("url", "/nope") + "?token=" + TOKEN, raw=True)
         check("GET /cache/uploads 可回读", status == 200 and image[:4] == b"\x89PNG", status)
+
+        for field in ("image_asset", "image_url"):
+            status, payload = request(base + "/api/chat", method="POST", payload={
+                "character_id": "Sakura", "text": "请看看这张手机截图", field: uploaded["url"]})
+            check("上传截图经 " + field + " 转为宿主图片内容", status == 200, status)
 
         status, payload = request(base + "/api/state", token="wrong-token")
         check("错误 token 被拒绝", status == 400 and "配对码无效" in payload, (status, payload))

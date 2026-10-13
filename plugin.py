@@ -45,6 +45,7 @@ class SakuraRemotePlugin:
         self._logger: Any = None
         self._config: object | None = None
         self._mobile: object | None = None
+        self._artifacts: object | None = None
         self._characters: object | None = None
         self._tts: object | None = None
         self._data_dir: Path | None = None
@@ -63,6 +64,10 @@ class SakuraRemotePlugin:
         self._data_dir = Path(getattr(context, "data_path")("."))
         self._config = getattr(context, "config")
         self._mobile = getattr(context, "get")(MOBILE_SERVICE)
+        try:
+            self._artifacts = getattr(context, "get")("sakura.host.artifacts")
+        except Exception:
+            self._artifacts = None
         self._characters = getattr(context, "get")(CHARACTER_SERVICE)
         # TTS 走普通服务代理：没有该服务时只有语音功能不可用，文字和立绘照常工作。
         try:
@@ -185,6 +190,7 @@ class SakuraRemotePlugin:
             server = run_remote_server(
                 self._data_dir,
                 mobile_service=self._mobile,
+                artifact_service=self._artifacts,
                 character_service=self._characters,
                 tts_service=self._tts,
                 host=str(config["host"]),

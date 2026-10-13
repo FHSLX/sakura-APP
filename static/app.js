@@ -2177,7 +2177,7 @@ function installContentWidthSync() {
 let screenshotWaiting = false;
 
 /**
- * 请求一次手机截屏并直接发给她。
+ * 请求一次手机截屏，预览后由用户手动发送。
  *
  * 链路：原生 MediaProjection 截图 → 原生按最长边 1280 缩放 + JPEG q70 压缩
  * → 这里拿到 data URL → 走已有的 /api/upload → 随消息一起给模型。
@@ -4741,7 +4741,7 @@ async function send(text) {
     const data = await postJson('/api/chat', {
       character_id: state.characterId,
       text: value,
-      image_url: attachment,
+      image_asset: attachment,
     });
     thinking.row.remove();
     thinking = null;

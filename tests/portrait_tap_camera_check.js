@@ -241,7 +241,7 @@ function loadPage(options) {
   };
   doc.defaultView = win;
 
-  const fetchStub = (url) => {
+  const fetchStub = (url, options) => {
     const text = String(url || '');
     if (text.indexOf('/api/upload') >= 0) {
       calls.upload += 1;
@@ -250,6 +250,7 @@ function loadPage(options) {
     }
     if (text.indexOf('/api/chat') >= 0) {
       calls.chat += 1;
+      calls.chatPayload = JSON.parse(options.body);
       return Promise.resolve({ ok: true, status: 200, json: async () => ({ segments: [], reply: '' }) });
     }
     if (text.indexOf('/api/history') >= 0) {
@@ -504,6 +505,8 @@ async function main() {
     await sleep(20);
     check('点发送后恰好上传一次', calls.upload === 1, calls.upload);
     check('点发送后恰好聊天一次', calls.chat === 1, calls.chat);
+    check('上传地址通过image_asset交给服务器解析', calls.chatPayload.image_asset === 'asset-1'
+      && !calls.chatPayload.image_url, calls.chatPayload);
     check('成功后清空待发附件', app.state.pendingMedia === null, app.state.pendingMedia);
     check('成功后清空两个 input 的值',
       camera.value === '' && image.value === '', [camera.value, image.value]);

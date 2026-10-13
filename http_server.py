@@ -236,6 +236,7 @@ def run_remote_server(
     base_dir: Path,
     *,
     mobile_service: Any,
+    artifact_service: Any = None,
     character_service: Any,
     tts_service: Any = None,
     host: str = DEFAULT_HOST,
@@ -261,6 +262,7 @@ def run_remote_server(
     service = RemoteService(
         base_dir,
         mobile_service=mobile_service,
+        artifact_service=artifact_service,
         character_service=character_service,
         tts_service=tts_service,
         logger=logger,
@@ -371,6 +373,7 @@ class RemoteService:
         base_dir: Path,
         *,
         mobile_service: Any,
+        artifact_service: Any = None,
         character_service: Any,
         tts_service: Any,
         logger: Any,
@@ -382,6 +385,7 @@ class RemoteService:
     ) -> None:
         self.base_dir = Path(base_dir)
         self.mobile = mobile_service
+        self.artifacts = artifact_service
         self.characters = character_service
         self.tts = tts_service
         self.logger = logger
@@ -1099,7 +1103,16 @@ class RemoteService:
         try:
             # 注意参数形状：sakura.host.mobile 的 begin/poll/cancel 第一个位置参数
             # 是调用方插件 ID（框架不会自动注入），history/characters 则不需要。
-            started = self.mobile.begin(PLUGIN_SERVICE_CALLER, character_id, clean_text, image_data_url)
+            image = self.image_artifact(image_data_url) if image_data_url else None
+            try:
+                started = self.mobile.begin(PLUGIN_SERVICE_CALLER, character_id, clean_text, image)
+            except Exception:
+                if image and self.artifacts is not None:
+                    try:
+                        self.artifacts.release(image["artifactId"])
+                    except Exception:
+                        pass
+                raise
             if isinstance(started, Mapping):
                 job_id = str(started.get("jobId") or "")
             if not job_id:
@@ -1126,6 +1139,35 @@ class RemoteService:
             self.mobile.cancel(PLUGIN_SERVICE_CALLER, job_id)
         except Exception:  # noqa: BLE001
             pass
+
+    def image_artifact(self, data_url: str) -> dict[str, Any]:
+        """Use the public host artifact service; host chat rejects raw image strings."""
+        if self.artifacts is None:
+            raise RemoteUnavailableError("宿主图片资源服务不可用，请更新电脑端 Sakura。")
+        media, separator, encoded = str(data_url).partition(";base64,")
+        media = media.removeprefix("data:").lower()
+        if not str(data_url).startswith("data:") or not separator or media not in _IMAGE_UPLOAD_TYPES:
+            raise ValueError("图片格式无效，请重新选择。")
+        try:
+            payload = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error) as error:
+            raise ValueError("图片编码无效。") from error
+        if not payload or len(payload) > MAX_IMAGE_BYTES:
+            raise ValueError("图片为空或过大。")
+        if not _image_payload_matches(_IMAGE_UPLOAD_TYPES[media], payload):
+            raise ValueError("图片内容与格式不符。")
+        allocation = self.artifacts.allocate({"mediaType": media, "suffix": _IMAGE_UPLOAD_TYPES[media]})
+        artifact_id = str(allocation["artifactId"])
+        try:
+            Path(str(allocation["path"])).write_bytes(payload)
+            committed = self.artifacts.commit(artifact_id)
+            return {key: committed[key] for key in ("artifactId", "mediaType", "byteLength")}
+        except Exception:
+            try:
+                self.artifacts.release(artifact_id)
+            except Exception:
+                pass
+            raise
 
     def image_data_url(self, asset_url: str) -> str:
         """把 /api/upload 返回的资源路径转回 data URL 交给宿主。"""
@@ -1425,6 +1467,10 @@ def _build_handler(service: RemoteService, token: str) -> type[BaseHTTPRequestHa
                     payload = self._read_json_body()
                     self._require_token(parsed, payload)
                     image = str(payload.get("image_url") or payload.get("image") or "")
+                    # Older clients used image_url for our uploaded local asset,
+                    # but the host needs the actual data URL, not a cache path.
+                    if image.startswith("/cache/uploads/"):
+                        image = service.image_data_url(image)
                     if not image:
                         image = service.image_data_url(
                             str(payload.get("image_asset") or "")
