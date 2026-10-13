@@ -3,6 +3,63 @@
 const BOOT = window.__SAKURA__ || {};
 const TOKEN = BOOT.token || '';
 
+/**
+ * 本次页面加载的代际会话 id（INT-01）。
+ *
+ * 由 static/page_session.js 在页面级引导位置统一生成，app.js 与
+ * overlay_touch_region.js **共用同一个编号**：
+ *   - 截图请求会带上它；原生只把结果送回「发起请求且会话仍匹配」的页面，
+ *     WebView reload 之后旧会话的迟到结果会被丢弃，不会串到新页面或别的 WebView；
+ *   - 两个模块不再各自随机生成，否则后登记的那个会覆盖先登记的会话，
+ *     截图请求就会被原生当成「页面已刷新」而拒绝；
+ *   - 启用/关闭穿透不刷新代际，只有导航/同 URL 刷新才会换新编号。
+ *
+ * 兜底：page_session.js 没能加载时退回「共享键」方案 —— 仍然保证 app.js 与
+ * 穿透模块拿到同一个编号（谁先执行谁生成并写回 window 上的共享键），
+ * 行为与旧版一致（仍然随机、仍然只在本次文档内有效），既不会因为缺模块
+ * 就完全失去会话隔离，也不会退化成两个模块各随机一个而互相覆盖。
+ */
+function makeFallbackPageSession() {
+  const KEY = '__sakuraSharedPageSessionId';
+  const existing = typeof window !== 'undefined' ? window[KEY] : '';
+  const id = (typeof existing === 'string' && existing)
+    ? existing
+    : 'ps-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36);
+  if (typeof window !== 'undefined') window[KEY] = id;
+  let registered = false;
+  return {
+    sessionId: id,
+    register() {
+      if (registered) return true;
+      const native = nativeBridge();
+      if (!native || typeof native.registerPageSession !== 'function') return false;
+      try {
+        native.registerPageSession(id);
+        registered = true;
+        return true;
+      } catch (error) {
+        return false;
+      }
+    },
+    invalidate() {
+      const native = nativeBridge();
+      if (!native || typeof native.invalidatePageSession !== 'function') return false;
+      try {
+        native.invalidatePageSession(id);
+        registered = false;
+        return true;
+      } catch (error) {
+        return false;
+      }
+    },
+  };
+}
+
+const PAGE_SESSION = (typeof window !== 'undefined' && window.SakuraPageSession)
+  ? window.SakuraPageSession
+  : makeFallbackPageSession();
+const PAGE_SESSION_ID = PAGE_SESSION.sessionId;
+
 const el = {
   stage: document.getElementById('stage'),
   portrait: document.getElementById('portrait'),
@@ -29,7 +86,6 @@ const el = {
   portraitYRange: document.getElementById('portraitYRange'),
   portraitYNumber: document.getElementById('portraitYNumber'),
   portraitYValue: document.getElementById('portraitYValue'),
-  floatToggle: document.getElementById('floatToggle'),
   fontRange: document.getElementById('fontRange'),
   fontNumber: document.getElementById('fontNumber'),
   fontValue: document.getElementById('fontValue'),
@@ -62,6 +118,8 @@ const el = {
   petToggle: document.getElementById('petToggle'),
   petHint: document.getElementById('petHint'),
   batteryButton: document.getElementById('batteryButton'),
+  passThroughToggle: document.getElementById('passThroughToggle'),
+  passThroughHint: document.getElementById('passThroughHint'),
   chatButton: document.getElementById('chatButton'),
   quickVoice: document.getElementById('quickVoice'),
   quickClear: document.getElementById('quickClear'),
@@ -92,6 +150,9 @@ const el = {
   bubbleHideValue: document.getElementById('bubbleHideValue'),
   text: document.getElementById('text'),
   image: document.getElementById('image'),
+  // 独立「拍照」入口：<input type="file" capture="environment">。
+  // 与图库选择分开，原生才会收到 isCaptureEnabled() 并走系统相机。
+  camera: document.getElementById('camera'),
   send: document.getElementById('send'),
   screenshotButton: document.getElementById('screenshotButton'),
   status: document.getElementById('status'),
@@ -107,6 +168,16 @@ const state = {
   portraitOverrides: new Map(),
   defaultPortraitKey: '',
   currentPortraitKey: '',
+  /**
+   * 当前显示在页面上的立绘是否真的加载成功。
+   *
+   * 为什么需要：以前 setPortrait 在**开始加载前**就把 currentPortraitKey
+   * 改成新 key，于是 A（慢）还没显示、B（快）已经显示时，旧请求 onload
+   * 会把新图覆盖回旧图；失败时同 key 也因为「已经是当前 key」而不再重试。
+   * 现在只有**最新一次加载成功**才提交 key，失败保留旧图并允许同 key 重试。
+   */
+  portraitReady: false,
+  portraitFailed: '',
   tones: [],
   voiceEnabled: !!BOOT.tts,
   autoplay: !!BOOT.autoplay,
@@ -116,6 +187,33 @@ const state = {
   playing: false,
   dirtyPlayback: false,
   lastText: '',
+  /**
+   * 语音任务代际。
+   *
+   * 静音 / 停止 / 切角色 / 页面销毁都会 +1；所有在途 TTS 与预取在真正播放
+   * 前都要复核它。旧实现没有代际，静音后迟到的合成响应照样会 play()。
+   */
+  voiceEpoch: 0,
+  /** key(角色+tone+文本) → {epoch, controller, promise}：有界预取缓存。 */
+  ttsPrefetch: new Map(),
+  /** 当前在途 TTS 请求数（含预取），用于限制并发。 */
+  ttsInflight: 0,
+  /** 去敏计数：请求数 / 预取数 / 复用数 / 取消数（报告与调试用）。 */
+  ttsStats: { requests: 0, prefetches: 0, reused: 0, aborted: 0 },
+  /**
+   * 发送状态：函数级防重复。
+   *
+   * 只 disable 按钮是不够的 —— 回车连击、脚本调用都会绕过按钮。
+   */
+  sending: false,
+  /**
+   * 待发送记录 { text, file, requestId, chatDispatched }。
+   *
+   * 失败时用它恢复可编辑草稿；成功后才清空。
+   */
+  pendingSend: null,
+  /** 会话内请求序号：用于区分同一任务迟到的响应。 */
+  sendSeq: 0,
   /** 立绘缩放倍率，1.0 表示充满屏幕高度。 */
   portraitScale: 1.0,
   pinchStart: 0,
@@ -144,8 +242,8 @@ const state = {
   /** 对话框像素微调 */
   dialogX: 0,
   dialogY: 0,
-  /** 立绘是否上下浮动 */
-  portraitFloat: true,
+  /** 立绘是否上下浮动（无偏好时默认关） */
+  portraitFloat: false,
   /** token 是否明文显示（默认打码） */
   tokenVisible: false,
   /** 角色列表与当前角色 */
@@ -171,6 +269,16 @@ const state = {
   bubbleHideSec: 12,
   /** 按下立绘时是否放大一点点（设置里可关）。 */
   pressFeedback: true,
+  /**
+   * 用户本次是否真的改过开关。
+   *
+   * 保存按钮只写「用户改过的」原生偏好，其余采纳原生当前值。否则一个停留在
+   * 旧状态的 App/浮窗页面按一次保存，就会把别处新改的关闭偏好覆盖回开启。
+   */
+  floatDirty: false,
+  passThroughDirty: false,
+  /** 空对话状态提示只出现一次，避免每次点人物都刷屏。 */
+  emptyDialogueNoted: false,
 };
 
 const PORTRAIT_SCALE_KEY = 'sakura.remote.portraitScale';
@@ -307,11 +415,9 @@ function applyFontScale(value, options = {}) {
 function applyDialogShift(x, y, options = {}) {
   const offsetX = clampNumber(x, -DIALOG_SHIFT_LIMIT, DIALOG_SHIFT_LIMIT, 0);
   const offsetY = clampNumber(y, -DIALOG_SHIFT_LIMIT, DIALOG_SHIFT_LIMIT, 0);
+  // state 里保留**用户设置值**（滑块、持久化都用它），显示值另行夹取
   state.dialogX = offsetX;
   state.dialogY = offsetY;
-  const root = document.documentElement;
-  root.style.setProperty('--pet-dialog-x', offsetX + 'px');
-  root.style.setProperty('--pet-dialog-y', offsetY + 'px');
   syncControl(el.dialogXRange, el.dialogXNumber, [el.dialogXValue], offsetX, '');
   syncControl(el.dialogYRange, el.dialogYNumber, [el.dialogYValue], offsetY, '');
   if (options.persist !== false) {
@@ -320,14 +426,61 @@ function applyDialogShift(x, y, options = {}) {
       localStorage.setItem(DIALOG_Y_KEY, String(offsetY));
     } catch (error) { /* 忽略 */ }
   }
+  syncDialogOffset();
   updateSaveState();
+}
+
+/**
+ * 对话框偏移的**显示值**：保留用户设置，但夹到卡片仍完整可见的范围。
+ *
+ * 真机「对话框左边被截断」的根因：旧实现把保存的 --pet-dialog-x 直接当
+ * left 用。用户为了对旧版「margin-left 覆盖 auto 居中」的偏差，往往存了一个
+ * 很大的负值；现在卡片恢复居中后，这个负值就把卡片推出窗口左边。
+ *
+ * 规则：
+ *   - state.dialogX/dialogY（以及滑块、localStorage）保持用户设置，绝不清除；
+ *   - 只夹 --pet-dialog-x/-y 的实际显示值；
+ *   - 水平可用范围按「居中后左右各剩多少」算，垂直范围按卡片上下是否出界算。
+ * 卡片未渲染（隐藏/自动隐藏）时不夹取，等重新显示时由 measure() 再夹。
+ */
+function syncDialogOffset() {
+  const root = document.documentElement;
+  const desiredX = state.dialogX || 0;
+  const desiredY = state.dialogY || 0;
+  let appliedX = desiredX;
+  let appliedY = desiredY;
+  const nav = el.msgNav;
+  const measurable = !!(isOverlayPage() && nav && nav.offsetWidth
+    && !nav.classList.contains('hidden')
+    && !nav.classList.contains('auto-hidden'));
+  if (measurable) {
+    // 先归零量卡片的基础位置，再按可见区域夹取（量完立刻恢复为夹取后的值）
+    root.style.setProperty('--pet-dialog-x', '0px');
+    root.style.setProperty('--pet-dialog-y', '0px');
+    const rect = nav.getBoundingClientRect();
+    const vw = Math.max(0, Math.round(window.innerWidth || 0));
+    const vh = Math.max(0, Math.round(window.innerHeight || 0));
+    // 卡片居中：左右各余 (vw - w) / 2，偏移不能超过它
+    const maxX = Math.max(0, Math.floor((vw - rect.width) / 2) - 1);
+    // 三段正常流布局：偏移还必须避开立绘和输入栏，不能只检查屏幕边缘。
+    const stageBottom = el.stage ? el.stage.getBoundingClientRect().bottom : 0;
+    const composerTop = el.composer ? el.composer.getBoundingClientRect().top : vh;
+    const maxUp = Math.max(0, Math.floor(rect.top - stageBottom));
+    const maxDown = Math.max(0, Math.floor(Math.min(vh, composerTop) - rect.bottom));
+    appliedX = Math.max(-maxX, Math.min(maxX, desiredX));
+    appliedY = Math.max(-maxUp, Math.min(maxDown, desiredY));
+  }
+  state.dialogAppliedX = appliedX;
+  state.dialogAppliedY = appliedY;
+  root.style.setProperty('--pet-dialog-x', appliedX + 'px');
+  root.style.setProperty('--pet-dialog-y', appliedY + 'px');
 }
 
 /** 立绘上下浮动开关（呼吸动画）。 */
 function applyPortraitFloat(value, options = {}) {
-  state.portraitFloat = !!value;
-  document.body.classList.toggle('no-float', !state.portraitFloat);
-  if (el.floatToggle) el.floatToggle.checked = state.portraitFloat;
+  // Legacy preferences cannot restore the removed floating animation.
+  state.portraitFloat = false;
+  document.body.classList.add('no-float');
   if (options.persist !== false) {
     try {
       localStorage.setItem(FLOAT_KEY, state.portraitFloat ? 'true' : 'false');
@@ -406,6 +559,94 @@ function installBridgeCallbacks() {
 }
 
 /**
+ * 登记本次页面加载的真实会话（RV-02 / INT-01）。
+ *
+ * 原生不再拿随机会话 id 和 URL 比较，而是按 (宿主 → 会话) 登记。
+ * 登记只做一次、且与穿透模块共用同一个代际编号：重复调用是幂等的，
+ * 启用/关闭穿透不会刷新会话，因此不会把在途截图请求作废。
+ * 同 URL reload 会换新的代际编号；旧结果在主线程投递瞬间复核时会失效。
+ * pagehide（含 reload / 关闭 / 离开）时主动注销，让在途结果立刻作废。
+ */
+function registerPageSession() {
+  if (PAGE_SESSION && typeof PAGE_SESSION.register === 'function') {
+    PAGE_SESSION.register();
+  }
+}
+
+/**
+ * 渲染可用性信号（FIX-BLANK-01）：告诉原生「现在页面里到底有没有可见内容」。
+ *
+ * 为什么必须由网页主动上报：
+ *   原生 WebView 的 onPageFinished 在 HTTP 404/500 或错误页上也会触发，
+ *   「文档加载完成」不等于「有可见立绘」。如果原生据此挂出完整透明窗口，
+ *   就会留下用户看不到内容、却整块矩形拦点击的窗口（本轮要修的实际缺陷）。
+ *   只有网页自己知道立绘是否真的解码显示，所以由网页上报：
+ *     - bootOk：DOM 与桥就绪（此时还不允许挂完整窗口）；
+ *     - portraitVisible：确认有可见且已解码的立绘（此时才允许）。
+ *
+ * 这些信号只带会话 id，不带 URL/token/聊天/图片内容；旧会话会被原生按代际丢弃。
+ */
+function notifyRenderSession(kind) {
+  // 可选协作函数：旧页面/测试片段可能没有它们，typeof 守卫避免中断立绘流程
+  if (typeof nativeBridge !== 'function') return false;
+  const native = nativeBridge();
+  if (!native) return false;
+  const id = (typeof PAGE_SESSION_ID === 'string') ? PAGE_SESSION_ID : '';
+  try {
+    if (kind === 'bootOk' && typeof native.notifyOverlayBootOk === 'function') {
+      native.notifyOverlayBootOk(id);
+      return true;
+    }
+    if (kind === 'portraitVisible' && typeof native.notifyOverlayPortraitVisible === 'function') {
+      native.notifyOverlayPortraitVisible(id);
+      return true;
+    }
+    if (kind === 'bootFailed' && typeof native.notifyOverlayBootFailed === 'function') {
+      native.notifyOverlayBootFailed(id);
+      return true;
+    }
+  } catch (error) {
+    // 桥不可用时静默：原生保持「没有可见内容」，不会挂出透明大窗
+    return false;
+  }
+  return false;
+}
+
+/**
+ * 只在确认有可见立绘时上报「可用」。
+ *
+ * 立绘是 <img>，仅把 src 赋值不代表解码成功；这里复核 complete/naturalWidth，
+ * 避免「图片还没解码就允许原生挂完整窗口」。
+ */
+function notifyPortraitVisibleIfReady() {
+  const portrait = el.portrait;
+  const ready = !!(state.portraitReady
+    && portrait
+    && portrait.complete !== false
+    && (portrait.naturalWidth === undefined || portrait.naturalWidth > 0));
+  if (ready) {
+    // 双保险：boot 就绪信号可能与立绘可见同帧，重复上报是幂等的
+    notifyRenderSession('bootOk');
+    notifyRenderSession('portraitVisible');
+  }
+  return ready;
+}
+
+function invalidatePageSession() {
+  if (PAGE_SESSION && typeof PAGE_SESSION.invalidate === 'function') {
+    PAGE_SESSION.invalidate();
+    return;
+  }
+  const native = nativeBridge();
+  if (!native || typeof native.invalidatePageSession !== 'function') return;
+  try { native.invalidatePageSession(PAGE_SESSION_ID); } catch (error) { /* 桥不可用 */ }
+}
+
+if (typeof window !== 'undefined' && window.addEventListener) {
+  window.addEventListener('pagehide', invalidatePageSession);
+}
+
+/**
  * 把当前地址回报给原生层作为配置兜底。
  *
  * 连接设置页跑在 https://localhost，远程页跑在 http://PC:8770 —— 两个不同源，
@@ -414,9 +655,21 @@ function installBridgeCallbacks() {
  */
 function reportUrlToNative() {
   const native = nativeBridge();
-  if (!native || typeof native.rememberUrl !== 'function') return;
+  if (!native) return;
+  // 悬浮窗/小球页面以 ?mode=overlay|bubble 加载。它们的地址绝不能被当成
+  //「用户当前连的地址」写回主配置 —— 否则旧立绘会把主 App 的新地址覆盖成旧地址。
+  const mode = new URLSearchParams(window.location.search).get('mode');
+  const overlayPage = mode === 'overlay' || mode === 'bubble';
   try {
-    native.rememberUrl(window.location.href);
+    if (overlayPage) {
+      if (typeof native.rememberOverlayUrl === 'function') {
+        native.rememberOverlayUrl(window.location.href);
+      }
+      return;
+    }
+    if (typeof native.rememberUrl === 'function') {
+      native.rememberUrl(window.location.href);
+    }
   } catch (error) { /* 桥接不可用时忽略 */ }
 }
 
@@ -444,7 +697,55 @@ function applyOverlayMode() {
   document.addEventListener('focusout', (event) => {
     if (event.target && event.target.tagName === 'TEXTAREA') setOverlayKeyboard(false);
   });
+  /*
+   * 点非编辑控件时主动释放输入焦点。
+   *
+   * 为什么需要：悬浮窗里点开输入框后，原生窗口被临时改成可聚焦（否则软键盘
+   * 弹不出来）。如果用户接着点了按钮/立绘/空白，而输入框自己不失焦，
+   * 页面就会一直向原生上报「键盘打开」，窗口保持可聚焦 —— 用户看到的就是
+   * 「焦点被对话框一直占着，别的界面点不动」。
+   *
+   * 这里只在「当前焦点在可编辑控件、而这次按下的目标不是可编辑控件」时
+   * 才 blur，绝不在输入框之间互相切换时抢焦点，也不与新弹出的输入请求竞争。
+   */
+  const releaseOnPointer = (event) => releaseOverlayInputFocus(event && event.target);
+  document.addEventListener('touchstart', releaseOnPointer, { passive: true, capture: true });
+  document.addEventListener('mousedown', releaseOnPointer, { passive: true, capture: true });
+  // 无障碍激活和程序化 click 不一定有 touchstart/mousedown；同样交还编辑焦点。
+  document.addEventListener('click', releaseOnPointer, { capture: true });
   return true;
+}
+
+/** 该元素是否是可编辑控件（输入框/文本域/下拉框/富文本）。 */
+function isEditableElement(node) {
+  if (!node || !node.tagName) return false;
+  const tag = String(node.tagName).toUpperCase();
+  if (tag === 'TEXTAREA' || tag === 'INPUT' || tag === 'SELECT') return true;
+  return !!node.isContentEditable;
+}
+
+/**
+ * 点击非编辑控件时释放输入焦点（悬浮窗专用）。
+ *
+ * 允许 blur 的条件很窄：当前焦点确实在可编辑控件上，且本次按下的目标不是
+ * 可编辑控件。满足时 blur 会触发 focusout，原生据此把窗口恢复成不可聚焦并
+ * 收起软键盘。
+ */
+function releaseOverlayInputFocus(target) {
+  if (isEditableElement(target)) return false;
+  const active = (typeof document !== 'undefined') ? document.activeElement : null;
+  if (!active || active === document.body) return false;
+  if (!isEditableElement(active)) return false;
+  if (active === target) return false;
+  if (typeof active.blur === 'function') {
+    try {
+      active.blur();
+    } catch (error) {
+      return false;
+    }
+    return true;
+  }
+  return false;
 }
 
 function setOverlayKeyboard(focused) {
@@ -453,6 +754,245 @@ function setOverlayKeyboard(focused) {
   try {
     native.setKeyboardOpen(!!focused);
   } catch (error) { /* 桥接不可用时忽略 */ }
+}
+
+/* ---------- 精确局部穿透（API33+ AttachedSurfaceControl）----------
+ *
+ * Android 13 起有公开的 AttachedSurfaceControl.setTouchableRegion(Region)：
+ * 前端预计算「立绘**外轮廓** + 可见控件」的输入区域，原生转成 surface 本地
+ * 设备像素后一次设定。外轮廓以外的一次 DOWN/UP 由系统直接路由给下层 ——
+ * 这才是真正的局部穿透；不是 touchstart 后切 FLAG_NOT_TOUCHABLE 那种假穿透。
+ *
+ * TS-03（用户授权）：外轮廓 = 每一行最左→最右不透明像素之间的一条带，
+ * 因此**外部**透明区穿透，发缝/内部空隙不穿透（内部保持可点）。
+ *
+ * 模块本身在 overlay_touch_region.js；这里只做界面开关、状态提示和通知。
+ */
+
+function touchRegionModule() {
+  return (typeof window !== 'undefined' && window.SakuraTouchRegion)
+    ? window.SakuraTouchRegion : null;
+}
+
+function touchRegionSupported() {
+  const native = nativeBridge();
+  if (!native || typeof native.isTouchRegionSupported !== 'function') return false;
+  try { return !!native.isTouchRegionSupported(); } catch (error) { return false; }
+}
+
+function isBubblePage() {
+  const body = typeof document !== 'undefined' ? document.body : null;
+  return !!(body && body.classList && body.classList.contains('bubble-mode'));
+}
+
+/** 穿透状态码 → 面向用户的一句话。 */
+function passThroughMessage(status) {
+  const reason = status && status.reason ? status.reason : 'idle';
+  const map = {
+    'applied': '已开启：立绘外轮廓以外的透明处会把轻点交给下层，人物与控件照常可点。',
+    'applying': '正在应用轮廓…',
+    'unchanged': '已开启：外轮廓以外的透明处会把轻点交给下层。',
+    'idle': '正在准备轮廓…',
+    'disabled': '未开启。开启后立绘外轮廓以外的透明处可直接点到下层桌面图标。',
+    'api-unsupported': '当前系统不支持精确局部穿透（需要 Android 13 及以上）。',
+    'bridge-missing': '原生桥不可用，无法开启穿透。',
+    'bridge-error': '设定输入区域失败，已自动回到整窗可交互。',
+    'alpha-scan-failed': '读取立绘透明通道失败，已回到整窗可交互。',
+    'portrait-failed': '立绘加载失败，已回到整窗可交互。',
+    'empty-region': '没有算出可交互区域，已回到整窗可交互。',
+    'contour-too-complex': '轮廓过于复杂，为保证人物不被误穿透，已回到整窗可交互。',
+    'image-too-large': '立绘尺寸超出上限，已回到整窗可交互。',
+    'payload-too-large': '轮廓数据过大，已回到整窗可交互。',
+    'payload-rejected': '轮廓数据被原生拒绝，已回到整窗可交互。',
+    'native-error': '原生设定输入区域失败，正在重试；当前整窗可交互。',
+    'native-disabled': '正在重新开启原生穿透…',
+    'surface-not-ready': '窗口暂时不可用，正在重试；当前整窗可交互。',
+    'session-not-registered': '页面会话尚未登记，正在重试。',
+    'stale': '已有更新的一版轮廓，等待生效。',
+    'bubble-not-ready': '小球布局尚未就绪，稍后重试。',
+    'encode-failed': '轮廓编码失败，已回到整窗可交互。',
+  };
+  return map[reason] || ('穿透状态：' + reason);
+}
+
+/** 原生穿透状态（alpha 安全上限、简化级别等，模块不读这些）。 */
+function readTouchRegionStatus() {
+  const native = nativeBridge();
+  if (!native || typeof native.touchRegionStatus !== 'function') return null;
+  try { return JSON.parse(native.touchRegionStatus()); } catch (error) { return null; }
+}
+
+/** 本机是否具备精确穿透能力：优先用原生偏好快照里的 supported。 */
+function passThroughSupported() {
+  const capability = nativeDisplayPreferences();
+  if (capability && capability.passThrough
+      && typeof capability.passThrough.supported === 'boolean') {
+    return !!capability.passThrough.supported;
+  }
+  return touchRegionSupported();
+}
+
+/**
+ * 统一的穿透状态。
+ *
+ * 悬浮窗/小球页面由 SakuraTouchRegion 拥有几何与 ACK；App 页面没有安装模块，
+ * 只读原生持久偏好（同一份状态，不依赖 localStorage 同步）。
+ */
+function passThroughStatus() {
+  const mod = touchRegionModule();
+  const installed = !!(mod && typeof mod.isInstalled === 'function' && mod.isInstalled());
+  if (installed && typeof mod.status === 'function') {
+    const status = mod.status();
+    const native = readTouchRegionStatus();
+    if (native) {
+      status.alpha = native.alpha;
+      status.windowAlpha = native.windowAlpha !== undefined ? native.windowAlpha : native.alpha;
+      status.originalAlpha = native.originalAlpha;
+      status.alphaReduced = !!native.alphaReduced;
+      status.alphaSafe = native.alphaSafe;
+      status.nativeActive = !!native.active;
+      status.restoreResult = native.restoreResult || '';
+      if (!status.level && typeof native.level === 'number') status.level = native.level;
+      if (!status.tolerance && typeof native.tolerance === 'number') status.tolerance = native.tolerance;
+    }
+    return status;
+  }
+  const capability = nativeDisplayPreferences();
+  if (!capability) return null;
+  const pt = capability.passThrough || {};
+  return {
+    supported: !!pt.supported,
+    desired: !!pt.value,
+    hasPreference: !!pt.has,
+    active: false,
+    reason: pt.value ? 'idle' : 'disabled',
+    approximated: false,
+    rects: 0,
+    segments: 0,
+    level: 0,
+    tolerance: 0,
+  };
+}
+
+function renderPassThrough() {
+  const supported = passThroughSupported();
+  const inOverlay = isOverlayPage() || isBubblePage();
+  const status = passThroughStatus();
+  if (el.passThroughToggle) {
+    // App 主界面也允许管理桌面立绘穿透：只持久化意图并经安全通道同步浮窗，
+    // 不在 App 页裁剪区域。旧系统（API<=32）明确禁用并提示。
+    el.passThroughToggle.disabled = !supported;
+    el.passThroughToggle.checked = !!(status && status.desired);
+  }
+  if (!el.passThroughHint) return;
+  if (!supported) {
+    el.passThroughHint.textContent =
+      '当前系统为 Android 12 或更低，不支持精确局部穿透（需要 Android 13 及以上）。'
+      + '旧系统仍可正常拖动、缩放、点击人物与控件，不会用整窗穿透冒充。';
+    return;
+  }
+  if (!inOverlay) {
+    const saved = status && status.desired;
+    el.passThroughHint.textContent = (saved ? '已保存：' : '')
+      + '桌面立绘的外轮廓穿透。在这里改会保存到本机；浮窗运行时立即应用，'
+      + '浮窗未运行则下次开启时生效。Android 13+ 会把立绘外轮廓以外的透明处一次轻点'
+      + '交给下层；头发缝隙等内部空隙不穿透（保持人物可点）。App 页面本身不裁剪区域。';
+    return;
+  }
+  let text = passThroughMessage(status);
+  if (status && status.desired && status.level > 0) {
+    const tolerance = typeof status.tolerance === 'number' ? status.tolerance : 0;
+    text += '（轮廓按 ' + status.level + ' 级聚合近似，边缘容差约 '
+      + tolerance.toFixed(1) + ' CSS 像素；已如实标注，不再宣称最多 1 设备像素）';
+  }
+  if (status && status.desired && status.alphaReduced) {
+    text += ' 受 Android 12+ 触摸安全上限限制，整窗会轻微变淡；关闭穿透即恢复原不透明度。';
+  }
+  if (status && status.desired && status.restoreResult === 'degraded') {
+    text += ' 本机型/ROM 已永久降级精确穿透，窗口不透明度已自动恢复正常（不会白变淡）。';
+  }
+  el.passThroughHint.textContent = text;
+}
+
+/** 立绘/控件几何变化后通知一次，模块会去抖提交。 */
+function notifyTouchRegion(reason) {
+  const mod = touchRegionModule();
+  if (!mod || typeof mod.notify !== 'function') return;
+  try { mod.notify(reason); } catch (error) { /* 忽略 */ }
+}
+
+/**
+ * 开关透明处穿透。
+ *
+ * 两类宿主明确分开：
+ *   - 悬浮窗/小球页面：由 SakuraTouchRegion 计算轮廓并提交区域（它会经原生
+ *     偏好通道持久化用户意图）；
+ *   - App / 普通页面：**不提交区域**，只写原生持久偏好；运行中的浮窗经
+ *     同进程安全通道收到新值并重算轮廓。
+ */
+function setPassThroughEnabled(enabled, options = {}) {
+  const mod = touchRegionModule();
+  const installed = !!(mod && typeof mod.isInstalled === 'function' && mod.isInstalled());
+  const inOverlay = isOverlayPage() || isBubblePage();
+  if (installed && inOverlay) {
+    if (!enabled) {
+      mod.setEnabled(false, options);
+      renderPassThrough();
+      return true;
+    }
+    if (!passThroughSupported()) {
+      systemNote('当前系统不支持精确局部穿透（需要 Android 13 及以上），旧系统保持整窗交互。');
+      renderPassThrough();
+      return false;
+    }
+    const ok = mod.setEnabled(true, options);
+    renderPassThrough();
+    return ok;
+  }
+  // App / 普通页面：只持久化意图，不裁剪区域。
+  if (options.persist === false) return true;
+  if (enabled && !passThroughSupported()) {
+    systemNote('当前系统为 Android 12 或更低，不支持精确局部穿透，保持整窗交互。');
+    renderPassThrough();
+    return false;
+  }
+  const result = writeNativeDisplayPreferences({ passThrough: !!enabled });
+  if (!result || result.ok !== true) {
+    const reason = result && result.error ? result.error : 'unavailable';
+    systemNote('保存穿透偏好失败（' + reason + '），未生效。');
+    renderPassThrough();
+    return false;
+  }
+  renderPassThrough();
+  return true;
+}
+
+/**
+ * 原生推送的偏好落地（浮窗页面）。
+ *
+ * 由 OverlayService 通过 evaluateJavascript 调用；只应用、不再写回原生，
+ * 因此不会形成 App ↔ 浮窗的回环。
+ */
+function applyNativeDisplayPreferences(prefs) {
+  if (!prefs || typeof prefs !== 'object') return false;
+  let applied = false;
+  if (typeof prefs.float === 'boolean') {
+    // 原生推来的值是权威的：不算「用户改动」，也不应被随后的保存再写回去
+    state.floatDirty = false;
+    applyPortraitFloat(prefs.float, { persist: false });
+    applied = true;
+  }
+  if (typeof prefs.passThrough === 'boolean') {
+    state.passThroughDirty = false;
+    setPassThroughEnabled(prefs.passThrough, { persist: false });
+    applied = true;
+  }
+  renderPassThrough();
+  return applied;
+}
+
+if (typeof window !== 'undefined') {
+  window.SakuraDisplayPreferences = { apply: applyNativeDisplayPreferences };
 }
 
 /* ---------- 悬浮窗手势：按住拖动 / 静置 5 秒开设置 ---------- */
@@ -480,11 +1020,34 @@ function installOverlayGestures() {
   let dragging = false;
   let longPressed = false;     // 长按已触发开设置，抬手时就不再算轻点
   let multiTouch = false;      // 本次手势是否出现了多指（让位穿透时会出现）
+  /*
+   * 本次手势是否真的由一根手指开始。
+   *
+   * 为什么需要：多指起手时 touchstart 会直接 return（不设 holding）。
+   * 如果抬手时只看「没拖动、没长按」，纯多指手势也会被判成一次轻点
+   * （坐标还是上一次留下的），表现为「点一下只应开关一次，却多触发一次」。
+   */
+  let gestureStarted = false;
   let lastX = 0;
   let lastY = 0;
   let holdTimer = 0;
   let startX = 0;
   let startY = 0;
+  /*
+   * 轻点采样专用的**视口坐标**起点。
+   *
+   * 为什么不能复用 startX/startY：那两个是 screenX/screenY（屏幕绝对坐标），
+   * 只有拖动需要它们（窗口一移动，client 参照就跟着动，会形成正反馈回路）。
+   * 而 portraitAlphaAt 是按 getBoundingClientRect() 的 **client 坐标**采样的。
+   * 上一版把 screen 坐标喂给 alpha 采样：浮窗一旦被用户拖离 (0,0)，
+   * 采样点就偏出去，真机表现就是「点人物不显示对话」。
+   *
+   * 所以这里在按下那一刻单独记一份 client 起点，两套坐标互不干扰：
+   *   拖动  -> startX/startY（screen）
+   *   轻点  -> startClientX/startClientY（client）
+   */
+  let startClientX = 0;
+  let startClientY = 0;
   // 绝对定位的「抓取点」：按下那一刻的窗口位置（CSS 像素）与手指位置
   let dragOriginWinX = 0;
   let dragOriginWinY = 0;
@@ -606,10 +1169,14 @@ function installOverlayGestures() {
     }
     const touch = event.touches[0];
     holding = true;
+    gestureStarted = true;
     dragging = false;
     longPressed = false;   // 每次按下都重置
     startX = touchScreenX(touch);
     startY = touchScreenY(touch);
+    // 轻点采样用视口坐标（见 startClientX 的说明）；拖动仍用上面的 screen 坐标
+    startClientX = (typeof touch.clientX === 'number') ? touch.clientX : startX;
+    startClientY = (typeof touch.clientY === 'number') ? touch.clientY : startY;
     lastX = startX;
     lastY = startY;
     clearHold();
@@ -752,8 +1319,9 @@ function installOverlayGestures() {
      * 「不是轻点」，表现就是「点立绘没反应」。长按是否发生过，用
      * longPressed 这个显式标记更可靠。
      */
-    const isTap = !cancelled && !dragging && !longPressed;
+    const isTap = !cancelled && !dragging && !longPressed && gestureStarted;
     holding = false;
+    gestureStarted = false;
     if (dragging) {
       setNativeDragging(false);   // 松手后恢复正常的 resize 校正
     }
@@ -763,7 +1331,7 @@ function installOverlayGestures() {
     clearPressFeedback();
     clearHold();
     // 位移已经逐次直接下发了，这里不需要再补发
-    if (isTap) onPortraitTap(startX, startY, target);
+    if (isTap) onPortraitTap(startClientX, startClientY, target);
   };
   target.addEventListener('touchend', (event) => {
     /*
@@ -793,10 +1361,14 @@ function installOverlayGestures() {
   // 鼠标也支持一份，方便在电脑浏览器里调试
   target.addEventListener('mousedown', (event) => {
     holding = true;
+    gestureStarted = true;
     dragging = false;
     longPressed = false;
     startX = event.clientX;
     startY = event.clientY;
+    // 鼠标没有 screen/client 之分，两份都填成同一值，轻点路径保持一致
+    startClientX = event.clientX;
+    startClientY = event.clientY;
     lastX = startX;
     lastY = startY;
     clearHold();
@@ -895,7 +1467,21 @@ function applyPortraitTransform() {
    */
   const centeredByMargin = document.body.classList.contains('overlay-mode');
   const shift = centeredByMargin ? '' : 'translateX(-50%) ';
-  wrap.style.transform = shift + 'scale(' + (base * factor).toFixed(4) + ')';
+  /*
+   * 缩放只能应用一次。
+   *
+   * 悬浮窗里 --pet-avail-h（stage 高度）已经按「适配尺寸 × 缩放」预留，
+   * transform 若再乘一次 scale 就是双重缩放：
+   *   - scale>1：可视高度 = 预留高度 × scale > 预留高度，头顶被 stage 裁掉；
+   *   - scale<1：可视高度远小于预留高度，立绘上方空出一大片
+   *     —— 真机「立绘裁切 / 与对话框间距异常」的根因。
+   * 所以只有「布局没有包含缩放」的场景（App 页面）才在 transform 里乘 scale。
+   * 用 --pet-avail-h 是否已写入判断，避免首帧（measure 还没跑）尺寸跳变。
+   */
+  const layoutIncludesScale = centeredByMargin
+    && !!document.documentElement.style.getPropertyValue('--pet-avail-h');
+  const visualScale = layoutIncludesScale ? factor : (base * factor);
+  wrap.style.transform = shift + 'scale(' + visualScale.toFixed(4) + ')';
 }
 
 /** 按下时放大多少（1.008 的量级，手机上不再明显跳动）。 */
@@ -937,10 +1523,50 @@ function clearPressFeedback() {
  *
  * 用户想「点一下学姐看看她说了什么，再点一下收起来」，所以做成切换。
  * 显示时不重新计时自动隐藏 —— 那是用户主动要求的，等 12 秒就自动收掉会很突兀。
+ *
+ * <p>「首次无本地历史」这一支要特别小心：恢复历史是异步的，恢复过程中
+ * {@code addBubble/showBubble} 已经把卡片变可见了。旧实现在 await 之后
+ * 又按「已可见」判断去 hideBubble，结果刚恢复就被自己隐藏（真机表现就是
+ * 点人物只闪一下、仍旧不显示上次对话）。这里在异步之前记录用户意图序列号，
+ * 恢复成功后**显示并立即返回**，不再走切换分支；期间用户又点过或角色切换过
+ * 则直接放弃，避免晚到的恢复强行显示。
  */
-function toggleBubbleByTap() {
+async function toggleBubbleByTap() {
   if (!el.msgNav) return;
-  if (el.msgNav.classList.contains('hidden')) return;   // 没内容，别切
+  if (state.dialogueRestorePending) {
+    state.dialogueRestoreSeq = (state.dialogueRestoreSeq || 0) + 1;
+    state.dialogueRestorePending = 0;
+    return;
+  }
+  const rows = Array.from(el.bubbles.querySelectorAll('.bubbleRow'));
+  if (latestContentIndex(rows) < 0) {
+    // 记录「这一次点击的意图」：用户要打开。序列号用于丢弃晚到的恢复结果。
+    const token = (state.dialogueRestoreSeq || 0) + 1;
+    state.dialogueRestoreSeq = token;
+    state.dialogueRestorePending = token;
+    let restored;
+    try {
+      restored = await restoreLastDialogue();
+    } finally {
+      if (state.dialogueRestorePending === token) state.dialogueRestorePending = 0;
+    }
+    if (token !== (state.dialogueRestoreSeq || 0)) return;   // 期间用户又点过
+    if (!restored) {
+      if (!state.emptyDialogueNoted) {
+        state.emptyDialogueNoted = true;
+        systemNote('还没有对话记录，发一条消息试试。');
+      }
+      return;
+    }
+    // 恢复分支：显示后立即返回，绝不再因为它「已经可见」而隐藏
+    showBubble();
+    return;
+  }
+  if (el.msgNav.classList.contains('hidden')) {
+    syncMessageNav(true);
+    showBubble();
+    return;
+  }
   const hidden = el.msgNav.classList.contains('auto-hidden')
     || el.msgNav.classList.contains('auto-hidden-now');
   if (hidden) {
@@ -949,6 +1575,32 @@ function toggleBubbleByTap() {
   } else {
     hideBubble(true);
   }
+}
+
+/**
+ * 恢复「上一次对话」。
+ *
+ * 关闭后重开、或气泡列表为空时，用户点人物应重新显示当前角色最近的有效对话。
+ * 只用当前 `state.characterId` 拉取，避免串到其他角色；await 期间角色被切换、
+ * 或用户又点了人物（序列号变化）时不强行显示。
+ *
+ * @return true 表示确实有可显示的对话
+ */
+async function restoreLastDialogue() {
+  const requestedCharacter = state.characterId || '';
+  const token = state.dialogueRestoreSeq || 0;
+  let rows = Array.from(el.bubbles.querySelectorAll('.bubbleRow'));
+  if (latestContentIndex(rows) < 0 && requestedCharacter) {
+    await loadHistory(true, { restoreSeq: token, suppressAutoShow: true });
+    // 晚到的响应：用户已经再次点击 / 角色已切换 → 不显示
+    if (token !== (state.dialogueRestoreSeq || 0)) return false;
+    if ((state.characterId || '') !== requestedCharacter) return false;
+    rows = Array.from(el.bubbles.querySelectorAll('.bubbleRow'));
+  }
+  if (latestContentIndex(rows) < 0) return false;
+  if (el.msgNav) el.msgNav.classList.remove('hidden');
+  syncMessageNav(true);
+  return true;
 }
 
 /* ---------- 已选内容提示条 ----------
@@ -1008,7 +1660,25 @@ function showMediaInfo(info) {
   relayoutForMediaInfo();
 }
 
+/**
+ * 待发图片大小上限，与后端/原生对齐：
+ * 后端 MAX_IMAGE_BYTES=8MiB、MAX_REQUEST_BYTES=16MiB。
+ * 6MiB 二进制 → base64 约 8MiB，加 JSON 仍远低于 16MiB 请求体上限。
+ */
+const MAX_PENDING_IMAGE_BYTES = 6 * 1024 * 1024;
+/** 截图 data URL 字符上限（6MiB 二进制 base64 约 8.4M 字符）。 */
+const MAX_SCREENSHOT_CHARS = 9 * 1024 * 1024;
+
+/** 释放待发附件持有的 object URL（选择图片的缩略图），避免大图泄漏。 */
+function releaseMediaInfo(info) {
+  if (info && info.objectUrl) {
+    try { URL.revokeObjectURL(info.objectUrl); } catch (error) { /* 忽略 */ }
+    info.objectUrl = '';
+  }
+}
+
 function clearMediaInfo() {
+  releaseMediaInfo(state.pendingMedia);
   state.pendingMedia = null;
   showMediaInfo(null);
 }
@@ -1023,45 +1693,106 @@ function describePickedFile(file) {
   return name + (kb ? '（' + size + '）' : '');
 }
 
-function onPickedFile() {
-  const file = el.image && el.image.files && el.image.files[0];
-  if (!file) {
-    state.pendingMedia = null;
-    showMediaInfo(null);
-    return;
+/** 选择图片的类型/大小校验；返回错误文案（空串 = 通过）。 */
+function validatePickedFile(file) {
+  if (!file) return '没有选中图片。';
+  const type = String(file.type || '').toLowerCase();
+  if (type && type.indexOf('image/') !== 0) return '只能选择图片文件。';
+  if (file.size && file.size > MAX_PENDING_IMAGE_BYTES) {
+    return '图片太大（上限 ' + Math.round(MAX_PENDING_IMAGE_BYTES / (1024 * 1024)) + ' MB）。';
   }
-  const info = { kind: 'file', name: describePickedFile(file), thumb: '' };
-  state.pendingMedia = info;
-  showMediaInfo(info);
-  // 用 objectURL 做缩略图，选完就能看到是哪张
-  try {
-    info.thumb = URL.createObjectURL(file);
-    showMediaInfo(info);
-  } catch (error) { /* 不支持就只显示文件名 */ }
+  return '';
 }
 
 /**
- * 截图：记一条「最近截图」并显示缩略图。
+ * 待发图片可能来自两个 input：拍照（#camera）与图库（#image）。
  *
- * 截图是立刻发出去的（没有"先选后发"的中间态），所以这里的作用是
- * 让用户确认「刚才截到了什么」，而不是等待发送。
+ * 优先用调用方指定的那个（change 事件是谁触发的），否则按「谁真的有文件」
+ * 回退，最后才用图库 input。这样旧调用 `onPickedFile()` 的语义不变。
  */
-function noteScreenshot(dataUrl) {
-  const round = (state.screenshotCount || 0) + 1;
-  state.screenshotCount = round;
+function mediaFileInputs(preferred) {
+  const list = [];
+  const push = (node) => { if (node && list.indexOf(node) < 0) list.push(node); };
+  push(preferred);
+  push(el.camera);
+  push(el.image);
+  return list;
+}
+
+/** 当前有选中文件的输入框（没有则返回 null）。 */
+function activeMediaInput(preferred) {
+  const inputs = mediaFileInputs(preferred);
+  for (const input of inputs) {
+    if (input.files && input.files[0]) return input;
+  }
+  return null;
+}
+
+/** 清空拍照/图库两个 input，避免提交时重复带上旧文件。 */
+function clearMediaInputs() {
+  mediaFileInputs(null).forEach((input) => {
+    try { input.value = ''; } catch (error) { /* 只读 input 忽略 */ }
+    if (input.classList) input.classList.remove('selected');
+  });
+}
+
+/**
+ * 用户选好图片（图库或直接拍照）：只做本地预览，不上传、不发送。
+ *
+ * 与截图共用同一个 `state.pendingMedia`，两者互相替换（旧附件的 object URL 立即释放）。
+ * 用户取消选择时**保留**已有附件，不做破坏性清理。
+ */
+function onPickedFile(input) {
+  const source = activeMediaInput(input) || input || el.image;
+  const file = source && source.files && source.files[0];
+  if (!file) return;
+  const problem = validatePickedFile(file);
+  if (problem) {
+    systemNote(problem);
+    if (source) source.value = '';
+    return;
+  }
+  const previous = state.pendingMedia;
+  const info = { kind: 'file', name: describePickedFile(file), thumb: '', file: file, dataUrl: '' };
+  // 用 objectURL 做缩略图，选完就能看到是哪张
+  try {
+    info.objectUrl = URL.createObjectURL(file);
+    info.thumb = info.objectUrl;
+  } catch (error) { /* 不支持就只显示文件名 */ }
+  state.pendingMedia = info;
+  releaseMediaInfo(previous);
+  showMediaInfo(info);
+  setStatus('图片已就绪，点发送才会发出去');
+  setTimeout(() => setStatus(''), 2400);
+}
+
+/**
+ * 截图本地预览（用户明确选择：先预览，点发送才上传）。
+ *
+ * 成功拿到截图只保存成待发附件并显示缩略图，**绝不**调用 /api/upload 或 /api/chat。
+ * 再次截图会替换旧预览，不累积大图；格式/大小无效时提示且不动原附件。
+ */
+function previewScreenshot(dataUrl) {
+  if (!/^data:(image\/[a-z0-9.+-]+);base64,/i.test(dataUrl)) {
+    systemNote('截图格式无法识别，已忽略。');
+    return false;
+  }
+  if (dataUrl.length > MAX_SCREENSHOT_CHARS) {
+    systemNote('截图过大，已忽略（不影响已选图片）。');
+    return false;
+  }
+  const previous = state.pendingMedia;
   const info = {
     kind: 'shot',
-    name: '截图 ' + round + '（已发送）',
+    name: '手机截屏（待发送，点发送才会发出去）',
     thumb: dataUrl,
+    dataUrl: dataUrl,
+    file: null,
   };
   state.pendingMedia = info;
+  releaseMediaInfo(previous);
   showMediaInfo(info);
-  // 自动淡出，避免一直占着空间。给足时间让用户看清缩略图和序号 ——
-  // 3 秒太短，截图后往往还没看清就消失了。
-  clearTimeout(noteScreenshot._timer);
-  noteScreenshot._timer = setTimeout(() => {
-    if (state.pendingMedia === info) clearMediaInfo();
-  }, 8000);
+  return true;
 }
 
 /* ---------- 媒体下拉菜单（图片 / 截屏）---------- */
@@ -1239,6 +1970,14 @@ function installContentWidthSync() {
     // 只服务悬浮窗；App 里的布局由 CSS 自己管，别插手
     if (!isOverlayPage()) return;
     /*
+     * 页面不可见（切到别的 App / 息屏 / 悬浮窗被隐藏）时不做这件事。
+     *
+     * 旧实现每 400ms 无条件量一次：即使没人看得见，也照样读
+     * getBoundingClientRect / offsetHeight（强制布局）再比较窗口尺寸。
+     * 恢复可见时由 visibilitychange 立刻补一次，不必靠定时器兜。
+     */
+    if (document.hidden) return;
+    /*
      * 拖动期间不重算窗口尺寸。
      * 除了避免和拖动抢主线程，更重要的是：窗口尺寸一变，
      * 立绘在窗口内的位置就会重排，拖动时看起来像「跳一下」。
@@ -1325,6 +2064,8 @@ function installContentWidthSync() {
     // 释放出来的空间，再手动位移就会补过头、立绘压住输入栏（实测 -42px 重叠）。
     document.documentElement.style.setProperty('--pet-nav-h', navH + 'px');
     document.documentElement.style.setProperty('--pet-composer-h', composerBudget + 'px');
+    // 卡片宽高刚更新：把用户保存的对话框偏移夹到仍完整可见的范围
+    if (typeof syncDialogOffset === 'function') syncDialogOffset();
 
     // ---- 立绘尺寸：由缩放倍率决定，并夹到可用空间内 ----
     // 注意用「当前视口高度」而不是 screen.height 来算上限。
@@ -1352,8 +2093,11 @@ function installContentWidthSync() {
     const maxPortraitW = targetContentW;
     const maxPortraitH = Math.max(100, availH - chrome - pad * 2);
     const base = Math.min(maxPortraitW / naturalW, maxPortraitH / naturalH);
-    const portraitW = Math.max(40, Math.round(naturalW * base * scale));
-    const portraitH = Math.max(40, Math.round(naturalH * base * scale));
+    // 倍率大于一时原生会夹住窗口，但网页不会自动夹住 stage。
+    // 在请求之前按同一宽高预算限制图片，保持宽高比并为卡片/输入栏保留空间。
+    const fittedScale = Math.min(base * scale, maxPortraitW / naturalW, maxPortraitH / naturalH);
+    const portraitW = Math.max(1, Math.round(naturalW * fittedScale));
+    const portraitH = Math.max(1, Math.round(naturalH * fittedScale));
 
     document.documentElement.style.setProperty('--pet-avail-h', portraitH + 'px');
 
@@ -1364,7 +2108,7 @@ function installContentWidthSync() {
     wrap.style.removeProperty('width');
     // --pet-scale 必须写在 #portraitWrap 上（applyPortraitScale 写的是它）
     wrap.style.setProperty('--pet-scale', scale.toFixed(3));
-  applyPortraitTransform();   // 缩放滑块变化时同步（保持同一个写入点）
+    applyPortraitTransform();   // 缩放滑块变化时同步（保持同一个写入点）
 
     // 立绘高度刚确定，把「上下位置」按新高度重算成像素。
     // 不重算的话：设位置时若高度还是 0/旧值，偏移量就是错的，
@@ -1379,8 +2123,11 @@ function installContentWidthSync() {
     // 立刻更新布局视口，读到的 innerHeight 是启动瞬间的旧值（实测把窗口从 761
     // 压成 403，内容全挤在一起）。窗口高度只按实测内容算；
     // 「卡片不许压住输入栏」由 CSS 的 max-height 负责（见 app.css 的 #msgNav）。
-    const wantW = Math.round(portraitW + pad * 2);
+    // 卡片和输入栏的目标宽度来自屏幕；窗口必须使用相同的宽度预算。
+    // 不能因缩小立绘而把已经按屏幕排版的卡片挤进另一尺寸的窗口。
+    const wantW = Math.round(screenW);
     const wantH = Math.round(portraitH + chrome);
+    syncDialogOffset();
     const last = readOverlayWindowSize();
     if (last && Math.abs(last.w - wantW) < 3 && Math.abs(last.h - wantH) < 3) {
       return;   // 尺寸没变，不再请求
@@ -1393,13 +2140,36 @@ function installContentWidthSync() {
     } catch (error) { /* 忽略 */ }
   }
 
+  let measureFrame = 0;
+  window.addEventListener('pagehide', () => {
+    if (measureFrame) cancelAnimationFrame(measureFrame);
+    measureFrame = 0;
+  }, { once: true });
+  const scheduleMeasure = () => {
+    if (document.hidden || measureFrame) return;
+    measureFrame = requestAnimationFrame(() => {
+      measureFrame = 0;
+      measure();
+    });
+  };
   if (portrait.complete) measure();
-  portrait.addEventListener('load', measure);
-  window.addEventListener('resize', measure);
-  // 缩放、换表情、语气切换都会改变立绘尺寸，定时兜底最省事
-  setInterval(measure, 400);
+  portrait.addEventListener('load', scheduleMeasure);
+  window.addEventListener('resize', scheduleMeasure);
+  window.addEventListener('touchend', scheduleMeasure);
+  window.addEventListener('mouseup', scheduleMeasure);
+  if (typeof ResizeObserver === 'function') {
+    const resizeObserver = new ResizeObserver(scheduleMeasure);
+    for (const target of [el.msgNav, el.msgBody, el.composer]) {
+      if (target) resizeObserver.observe(target);
+    }
+    window.addEventListener('pagehide', () => resizeObserver.disconnect(), { once: true });
+  }
+  // 恢复可见时立刻补一次（隐藏期间定时器会被 measure 自己的 early-return 跳过）
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) scheduleMeasure();
+  });
   // 暴露给历史导航：卡片内容变了要重新量高度
-  relayoutOverlay = measure;
+  relayoutOverlay = scheduleMeasure;
 }
 
 /* ---------- 手机截屏（让学姐看到你正在看什么）---------- */
@@ -1417,7 +2187,8 @@ let screenshotWaiting = false;
  */
 function requestScreenshot() {
   const native = nativeBridge();
-  if (!native || typeof native.requestScreenshot !== 'function') {
+  if (!native || (typeof native.requestScreenshot !== 'function'
+      && typeof native.requestScreenshotWithSession !== 'function')) {
     systemNote('截图需要在手机 App 内使用。');
     return;
   }
@@ -1425,7 +2196,12 @@ function requestScreenshot() {
   screenshotWaiting = true;
   setStatus('正在截屏…');
   try {
-    native.requestScreenshot();
+    // 优先带 pageSessionId：结果只送回本次页面会话
+    if (typeof native.requestScreenshotWithSession === 'function') {
+      native.requestScreenshotWithSession(PAGE_SESSION_ID);
+    } else {
+      native.requestScreenshot();
+    }
   } catch (error) {
     screenshotWaiting = false;
     setStatus('');
@@ -1449,59 +2225,13 @@ function onScreenCapture(dataUrl, error) {
     systemNote('截图失败：' + (error || '未知错误'));
     return;
   }
-  sendWithScreenshot(dataUrl);
-}
-
-/** 把截图发给角色：上传拿到 URL，再当作一条带图消息发出去。 */
-async function sendWithScreenshot(dataUrl) {
-  // 先记一笔「截了什么」，让用户看到缩略图和序号
-  noteScreenshot(dataUrl);
-  const match = /^data:(image\/[a-z+]+);base64,(.*)$/i.exec(dataUrl);
-  if (!match) {
-    systemNote('截图格式无法识别。');
-    return;
-  }
-  el.send.disabled = true;
-  stopVoice();
-  try {
-    const kb = Math.round(match[2].length * 0.75 / 1024);
-    setStatus('正在上传截图（约 ' + kb + ' KB）…');
-    const uploaded = await postJson('/api/upload', {
-      media_type: match[1].toLowerCase(),
-      data: match[2],
-    });
-    const asset = uploaded.url || '';
-    if (!asset) throw new Error('上传没有返回地址');
-
-    addBubble('user', '（手机截屏）');
-    const thinking = addBubble('assistant', '', { typing: true });
-    setStatus(state.displayName + ' 正在看…');
-    const data = await postJson('/api/chat', {
-      character_id: state.characterId,
-      text: '看看我的屏幕。',
-      image_asset: asset,
-    });
-    thinking.row.remove();
-    const segments = segmentsFromReply(data);
-    for (const segment of segments) {
-      // deferText：先建空气泡，等这段语音播放时再逐字填
-      const node = addBubble('assistant', segment.rawText || segment.text, {
-        secondary: segment.rawText ? segment.text : '',
-        deferText: true,
-      });
-      segment.bubble = node.bubble;
-      setPortrait(segment.tone);
-      enqueueSegment(segment);
-      if (!state.voiceEnabled) await sleep(180);
-    }
-    if (!segments.length) systemNote('（这条回复没有可显示内容）');
-    setStatus('');
-  } catch (err) {
-    systemNote('截图发送失败：' + (err && err.message ? err.message : err));
-    setStatus('');
-  } finally {
-    el.send.disabled = false;
-    state.dirtyPlayback = true;
+  /*
+   * 用户明确选择：先本地预览，点「发送」才上传。
+   * 这里**绝不**调用 /api/upload 或 /api/chat，也不自动发送。
+   */
+  if (previewScreenshot(dataUrl)) {
+    setStatus('截图已就绪，点发送发给角色');
+    setTimeout(() => setStatus(''), 2600);
   }
 }
 
@@ -1787,11 +2517,54 @@ function loadDisplayPrefs() {
     stored(DIALOG_Y_KEY, 0),
     { persist: false }
   );
-  applyPortraitFloat(readBool(FLOAT_KEY, true), { persist: false });
+  applyPortraitFloat(readBool(FLOAT_KEY, false), { persist: false });
   applyBubbleHideDelay(stored(BUBBLE_HIDE_DELAY_KEY, BUBBLE_HIDE_DEFAULT), { persist: false });
   setPressFeedbackEnabled(readBool(PRESS_FEEDBACK_KEY, PRESS_FEEDBACK_DEFAULT), { persist: false });
+  // 浮动偏好历史上只存本机 localStorage：只有原生有**明确**偏好时才覆盖回放，
+  // 否则升级用户已有的本机选择会被默认值抹掉。
+  const nativePrefs = nativeDisplayPreferences();
+  if (nativePrefs && nativePrefs.float && nativePrefs.float.has === true
+      && typeof nativePrefs.float.value === 'boolean') {
+    applyPortraitFloat(!!nativePrefs.float.value, { persist: false });
+  }
+  // 刚回放完偏好，还不算「用户改动」
+  state.floatDirty = false;
+  state.passThroughDirty = false;
   updateSaveState._loading = false;
   setSaveState('设置会自动保存', false);
+}
+
+/**
+ * 读取原生持久偏好快照（App / 浮窗 / 小球共用）。
+ *
+ * 返回 {float:{has,value}, passThrough:{has,value,supported}} 或 null。
+ * 刻意**不**依赖两个 WebView 的 localStorage 自动同步。
+ */
+function nativeDisplayPreferences() {
+  const native = nativeBridge();
+  if (!native || typeof native.displayPreferences !== 'function') return null;
+  try {
+    return JSON.parse(native.displayPreferences());
+  } catch (error) {
+    return null;
+  }
+}
+
+/** 写入原生持久偏好；返回回执对象或 null（无桥/异常/畸形）。 */
+function writeNativeDisplayPreferences(payload) {
+  const native = nativeBridge();
+  if (!native || typeof native.setDisplayPreferences !== 'function') return null;
+  let raw;
+  try {
+    raw = native.setDisplayPreferences(JSON.stringify(payload));
+  } catch (error) {
+    return { ok: false, error: 'bridge-error' };
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    return { ok: false, error: 'bad-reply' };
+  }
 }
 
 /* ---------- 配置页底部保存栏 ----------
@@ -1837,27 +2610,157 @@ function readNumber(key, fallback) {
   }
 }
 
-/** 把所有显示偏好重新写进本机存储，并给出明确反馈。 */
+/**
+ * 读取「可见控件当前值」并立即套用（含尚未 blur 的数字框）。
+ *
+ * 用户的真实抱怨是「改了数字框、没点别处，直接点保存 → 没生效」：
+ * 旧实现只写 state（state 要等 change/blur 才更新）。这里直接从 DOM 取当前值，
+ * 用与滑块相同的 apply 函数套用，再统一持久化。
+ */
+function commitVisibleDisplayValues() {
+  const pickNumber = (numberEl, rangeEl, fallback) => {
+    if (numberEl && numberEl.value !== '' && isFinite(Number(numberEl.value))) {
+      return Number(numberEl.value);
+    }
+    if (rangeEl && rangeEl.value !== '' && isFinite(Number(rangeEl.value))) {
+      return Number(rangeEl.value);
+    }
+    return fallback;
+  };
+  const scalePercent = pickNumber(el.scaleNumber, el.scaleRange,
+    Math.round((state.portraitScale || 1) * 100));
+  applyPortraitScale(scalePercent / 100, { persist: false });
+  applyPortraitOffset(pickNumber(el.portraitYNumber, el.portraitYRange, state.portraitY || 0),
+    { persist: false });
+  applyFontScale(pickNumber(el.fontNumber, el.fontRange, state.fontScale || 100),
+    { persist: false });
+  applyDialogShift(
+    pickNumber(el.dialogXNumber, el.dialogXRange, state.dialogX || 0),
+    pickNumber(el.dialogYNumber, el.dialogYRange, state.dialogY || 0),
+    { persist: false }
+  );
+  applyBubbleHideDelay(
+    pickNumber(el.bubbleHideNumber, el.bubbleHideRange, state.bubbleHideSec || 0),
+    { persist: false });
+  if (el.showOriginalToggle) applyShowOriginal(el.showOriginalToggle.checked);
+  if (el.showTranslationToggle) applyShowTranslation(el.showTranslationToggle.checked);
+  if (el.autoScrollToggle) applyAutoScroll(el.autoScrollToggle.checked);
+  if (el.pressFeedbackToggle) {
+    setPressFeedbackEnabled(el.pressFeedbackToggle.checked, { persist: false });
+  }
+}
+
+/** 把可见显示值写进本机存储并**回读校验**；返回失败的 key 列表。 */
+function persistDisplayValuesLocal() {
+  const writes = [
+    [PORTRAIT_SCALE_KEY, String(state.portraitScale || 1)],
+    [PORTRAIT_Y_KEY, String(state.portraitY || 0)],
+    [FONT_SCALE_KEY, String(state.fontScale || 100)],
+    [DIALOG_X_KEY, String(state.dialogX || 0)],
+    [DIALOG_Y_KEY, String(state.dialogY || 0)],
+    [FLOAT_KEY, state.portraitFloat ? 'true' : 'false'],
+    [SHOW_ORIGINAL_KEY, state.showOriginal ? 'true' : 'false'],
+    [SHOW_TRANSLATION_KEY, state.showTranslation ? 'true' : 'false'],
+    [AUTO_SCROLL_KEY, state.autoScroll ? 'true' : 'false'],
+    [PRESS_FEEDBACK_KEY, state.pressFeedback ? 'true' : 'false'],
+    [BUBBLE_HIDE_DELAY_KEY,
+      String(Math.max(0, Math.min(60, Math.round(Number(state.bubbleHideSec) || 0))))],
+  ];
+  const failed = [];
+  writes.forEach(([key, value]) => {
+    try {
+      localStorage.setItem(key, value);
+      if (localStorage.getItem(key) !== value) failed.push(key);
+    } catch (error) {
+      failed.push(key);
+    }
+  });
+  return failed;
+}
+
+/**
+ * 把「浮动 + 穿透」偏好同步到原生（App/浮窗/小球共用一份），并回读校验。
+ *
+ * 不依赖 localStorage 自动同步：原生偏好是事实来源，运行中的浮窗经同进程
+ * 安全通道收到新值后自己重算轮廓。
+ */
+function syncNativeDisplayPreferences() {
+  const native = nativeBridge();
+  if (!native || typeof native.setDisplayPreferences !== 'function') {
+    return { ok: true, skipped: true };
+  }
+  const capability = nativeDisplayPreferences();
+  const payload = {};
+  /*
+   * 只写「用户本次真的改过」的原生偏好；其余采纳原生当前值。
+   *
+   * 为什么必须这样：App 与浮窗是两个 WebView。一个停留在旧状态的页面按保存，
+   * 如果无条件把自己控件里的值写回原生，就会把另一个页面（或上次会话）刚保存的
+   * 「关闭穿透」覆盖回开启 —— 正是真机「关闭后重开仍半透明」的同步缺陷。
+   */
+  if (state.floatDirty) {
+    payload.float = !!state.portraitFloat;
+  } else if (capability && capability.float && capability.float.has === true
+      && typeof capability.float.value === 'boolean') {
+    applyPortraitFloat(!!capability.float.value, { persist: false });
+  }
+  const toggleUsable = !!(el.passThroughToggle && !el.passThroughToggle.disabled);
+  if (toggleUsable) {
+    if (state.passThroughDirty) {
+      payload.passThrough = !!el.passThroughToggle.checked;
+    } else if (capability && capability.passThrough
+        && typeof capability.passThrough.value === 'boolean') {
+      // 没改过就跟随原生，别用旧页面的勾选状态覆盖
+      el.passThroughToggle.checked = !!capability.passThrough.value;
+      setPassThroughEnabled(!!capability.passThrough.value, { persist: false });
+    }
+  }
+  if (!Object.keys(payload).length) {
+    return { ok: true, unchanged: true };
+  }
+  const result = writeNativeDisplayPreferences(payload);
+  if (!result || result.ok !== true) {
+    return { ok: false, error: (result && result.error) ? result.error : 'unavailable' };
+  }
+  const prefs = nativeDisplayPreferences();
+  if (payload.float !== undefined && prefs && prefs.float
+      && !!prefs.float.value !== !!state.portraitFloat) {
+    return { ok: false, error: 'readback-mismatch' };
+  }
+  if (payload.passThrough !== undefined && prefs && prefs.passThrough
+      && typeof prefs.passThrough.value === 'boolean'
+      && !!prefs.passThrough.value !== !!payload.passThrough) {
+    return { ok: false, error: 'readback-mismatch' };
+  }
+  state.floatDirty = false;
+  state.passThroughDirty = false;
+  return { ok: true };
+}
+
+/**
+ * 保存按钮：保存**可见控件当前值**（含尚未 blur 的数字框、浮动与穿透偏好）。
+ *
+ * 分别处理：
+ *   - 本机显示设置 → localStorage（回读校验，失败如实报「本机存储不可用」）；
+ *   - 桌面立绘偏好（浮动/穿透）→ 原生持久状态（浮窗运行时立即同步）；
+ *   - 电脑端设置（自动朗读/语音合成）→ 由「保存到电脑端」按钮单独提交，
+ *     失败原因由它自己的提示显示，不在这里假装成功。
+ */
 function saveAllDisplaySettings() {
-  try {
-    localStorage.setItem(PORTRAIT_SCALE_KEY, String(state.portraitScale || 1));
-    localStorage.setItem(PORTRAIT_Y_KEY, String(state.portraitY || 0));
-    localStorage.setItem(FONT_SCALE_KEY, String(state.fontScale || 100));
-    localStorage.setItem(DIALOG_X_KEY, String(state.dialogX || 0));
-    localStorage.setItem(DIALOG_Y_KEY, String(state.dialogY || 0));
-    localStorage.setItem(FLOAT_KEY, state.portraitFloat ? 'true' : 'false');
-    localStorage.setItem(SHOW_ORIGINAL_KEY, state.showOriginal ? 'true' : 'false');
-    localStorage.setItem(SHOW_TRANSLATION_KEY, state.showTranslation ? 'true' : 'false');
-    localStorage.setItem(AUTO_SCROLL_KEY, state.autoScroll ? 'true' : 'false');
-    localStorage.setItem(
-      BUBBLE_HIDE_DELAY_KEY,
-      String(Math.max(0, Math.min(60, Math.round(Number(state.bubbleHideSec) || 0))))
-    );
-  } catch (error) {
-    setSaveState('保存失败：本机存储不可用', false);
+  commitVisibleDisplayValues();
+  const failed = persistDisplayValuesLocal();
+  if (failed.length) {
+    setSaveState('保存失败：本机存储不可用（' + failed.length + ' 项未写入）', false);
     return;
   }
-  setSaveState('已保存 ✓', true);
+  const native = syncNativeDisplayPreferences();
+  if (!native.ok) {
+    setSaveState('本机显示设置已保存；桌面立绘偏好保存失败：' + native.error, false);
+    return;
+  }
+  setSaveState(native.skipped
+    ? '已保存到本机 ✓（电脑端设置请点「保存到电脑端」）'
+    : '已保存到本机与桌面立绘偏好 ✓', true);
 }
 
 /**
@@ -2001,6 +2904,7 @@ function renderConfig() {
   if (el.autoplayToggle) el.autoplayToggle.checked = !!state.serverSettings.autoplay;
   if (el.ttsToggle) el.ttsToggle.checked = !!state.serverSettings.tts_enabled;
   renderPetPanel();
+  renderPassThrough();
 }
 
 function isInsideApp() {
@@ -2016,6 +2920,8 @@ function openConfig(open) {
     renderConfig();
     loadCharacters();
   }
+  // 配置浮层出现/消失会遮住或让出立绘，可交互区域随之变化
+  notifyTouchRegion('config-panel');
 }
 
 /* ---------- 角色列表 ---------- */
@@ -2352,19 +3258,53 @@ function resolvePortraitKey(tone) {
   return state.portraitByKey.keys().next().value || '';
 }
 
+/**
+ * 立绘加载代次：latest-wins。
+ *
+ * 只要发起新的一次加载，代次就加一；只有「最新代次」的 onload 才允许
+ * 提交 currentPortraitKey 与 el.portrait.src。旧请求（慢 A）回来时因为代次
+ * 已经过期，直接丢弃，不会把新图（快 B）覆盖回去。
+ */
+let portraitGeneration = 0;
+
 function setPortrait(tone) {
   const key = resolvePortraitKey(tone);
-  if (!key || key === state.currentPortraitKey) return;
+  if (!key) return;
   const url = state.portraitByKey.get(key);
   if (!url) return;
-  state.currentPortraitKey = key;
+  // 已经成功显示同一张：不重复加载（但上次失败时允许同 key 重试）
+  if (key === state.currentPortraitKey && state.portraitReady) return;
+  const generation = ++portraitGeneration;
   el.portrait.classList.add('switching');
   const next = new Image();
   next.onload = () => {
+    if (generation !== portraitGeneration) return;   // 陈旧请求，丢弃
     el.portrait.src = url;
+    // 只有最新一次**加载成功**才提交 key
+    state.currentPortraitKey = key;
+    state.portraitReady = true;
+    state.portraitFailed = '';
+    window.__sakuraPortraitKey = key;
     requestAnimationFrame(() => el.portrait.classList.remove('switching'));
+    // 换图后 alpha 轮廓变了，通知穿透模块重新扫描
+    notifyTouchRegion('portrait-loaded');
+    if (typeof relayoutOverlay === 'function') relayoutOverlay();
+    // 立绘已确认可见：这是原生唯一允许挂完整悬浮窗的依据（FIX-BLANK-01）
+    if (typeof notifyPortraitVisibleIfReady === 'function') notifyPortraitVisibleIfReady();
   };
-  next.onerror = () => el.portrait.classList.remove('switching');
+  next.onerror = () => {
+    if (generation !== portraitGeneration) return;
+    // 保留当前可见的旧图，不提前提交 key；同一个 key 下次调用会重新加载
+    state.portraitReady = false;
+    state.portraitFailed = key;
+    el.portrait.classList.remove('switching');
+    notifyTouchRegion('portrait-failed');
+    // 立绘失败但没有可见旧图时，必须让原生知道「现在没有可见内容」，
+    // 否则窗口会停在完整透明形态。有可见旧图时保持挂载（页面仍有内容）。
+    if (!el.portrait || !el.portrait.complete || el.portrait.naturalWidth === 0) {
+      if (typeof notifyRenderSession === 'function') notifyRenderSession('bootFailed');
+    }
+  };
   next.src = url;
 }
 
@@ -2448,7 +3388,7 @@ function addBubble(role, text, options = {}) {
   // 翻阅按钮一直藏着（实测有 16 条历史也没有按钮）。
   syncMessageNav();
   // 有新内容就把对话框显示出来并重新计时（说完一段时间后才收起）
-  scheduleBubbleAutoHide();
+  if (!options.suppressAutoShow) scheduleBubbleAutoHide();
   return { row: row, bubble: bubble };
 }
 
@@ -2498,13 +3438,37 @@ function isOverlayPage() {
  * 全部气泡节点都还在 DOM 里（语音、语气表情都依赖它们），
  * 只是用 .current 控制哪一条可见。完整历史仍然在 App 内可看。
  */
+/**
+ * 一条气泡行是否有可显示内容。
+ *
+ * 「正在输入」占位气泡（typing）没有 dataset.primary，只有三个点；
+ * 系统提示可能为空。把它们当成「最近一条对话」会显示成空卡片
+ *（真机表现就是对话框一直是空的/「待输入」）。
+ */
+function rowHasContent(row) {
+  if (!row) return false;
+  const primary = String(row.dataset.primary || '').trim();
+  const secondary = String(row.dataset.secondary || '').trim();
+  return !!(primary || secondary);
+}
+
+/** 最近一条**有内容**的气泡行下标；没有就返回 -1。 */
+function latestContentIndex(rows) {
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    if (rowHasContent(rows[index])) return index;
+  }
+  return -1;
+}
+
 function syncMessageNav(showLatest = true) {
   const rows = Array.from(el.bubbles.querySelectorAll('.bubbleRow'));
   state.messageCount = rows.length;
+  const latest = latestContentIndex(rows);
   if (!rows.length) {
     state.messageIndex = 0;
   } else if (showLatest || state.messageIndex >= rows.length) {
-    state.messageIndex = rows.length - 1;
+    // 首次/重开优先定位到最近一条**有内容**的对话，而不是空的占位行
+    state.messageIndex = latest >= 0 ? latest : rows.length - 1;
   } else if (state.messageIndex < 0) {
     state.messageIndex = 0;
   }
@@ -2540,14 +3504,26 @@ function applyMessageNav(options = {}) {
   // 把当前这条渲染进对话框卡片（参考电脑端：文字 + 右侧竖排切换按钮）。
   // 内容取自 row.dataset —— 气泡行在悬浮窗里是 display:none，
   // 从隐藏 DOM 里读不到文字（querySelector('.bubble') 会返回 null）。
-  const row = total ? rows[state.messageIndex] : null;
+  let row = total ? rows[state.messageIndex] : null;
+  // 当前定位到的是空占位（正在输入/空系统行）时，回退到最近一条有内容的对话，
+  // 绝不让占位符顶掉真实对话。
+  if (total && !rowHasContent(row)) {
+    const fallback = latestContentIndex(rows);
+    if (fallback >= 0) {
+      state.messageIndex = fallback;
+      row = rows[fallback];
+    }
+  }
   if (el.msgBody) {
-    el.msgBody.innerHTML = '';
     const role = row ? (row.dataset.role || '') : '';
-    el.msgBody.className = 'msgBody ' + role;
-    if (row) {
-      const primary = row.dataset.primary || '';
-      const secondary = row.dataset.secondary || '';
+    const primary = row ? (row.dataset.primary || '') : '';
+    const secondary = row ? (row.dataset.secondary || '') : '';
+    const contentKey = JSON.stringify([role, primary, secondary]);
+    // Periodic layout measurements must not rebuild unchanged dialogue DOM.
+    if (el.msgBody._contentKey !== contentKey) {
+      el.msgBody._contentKey = contentKey;
+      el.msgBody.innerHTML = '';
+      el.msgBody.className = 'msgBody ' + role;
       if (secondary && secondary !== primary) {
         const original = document.createElement('div');
         original.className = 'textOriginal';
@@ -2560,8 +3536,8 @@ function applyMessageNav(options = {}) {
       } else {
         el.msgBody.textContent = primary;
       }
+      el.msgBody.scrollTop = 0;
     }
-    el.msgBody.scrollTop = 0;
   }
   /*
    * 短回复让卡片保持紧凑，长回复才放开宽度。
@@ -2596,6 +3572,8 @@ function applyMessageNav(options = {}) {
   if (!options.skipRelayout && typeof relayoutOverlay === 'function') {
     relayoutOverlay();
   }
+  // 卡片显隐/高度变化会改变可交互控件矩形，通知穿透模块重算
+  if (!options.skipRelayout) notifyTouchRegion('message-nav');
 }
 
 /**
@@ -2729,6 +3707,10 @@ function bubbleHideDelayMs() {
 }
 
 function hideBubble(immediate) {
+  if (immediate) {
+    state.dialogueRestoreSeq = (state.dialogueRestoreSeq || 0) + 1;
+    state.dialogueRestorePending = 0;
+  }
   if (!el.msgNav || el.msgNav.classList.contains('hidden')) return;
   if (state.bubbleAutoHideOff) return;
   el.msgNav.classList.add('auto-hidden');
@@ -2913,11 +3895,20 @@ function scheduleBubbleAutoHide() {
 function installBubbleTapToHide() {
   if (!isOverlayPage()) return;
   const KEEP = '#msgNav, #composer, #configPanel, #mediaMenu, #mediaPanel';
+  /** 人物本体的透明判定阈值，与 installClickThrough 保持一致。 */
+  const PORTRAIT_ALPHA_MIN = 16;
   window.addEventListener('pointerdown', (event) => {
     const target = event.target;
     if (!(target instanceof Element)) return;
     // 点在这些交互区域里不收起
     if (target.closest(KEEP)) return;
+    /*
+     * 人物本体的「收/放」由 touchend 的单一所有者（onPortraitTap →
+     * toggleBubbleByTap）处理。pointerdown 属于同一次手势的**更早阶段**，
+     * 如果这里先 hideBubble，touchend 再 toggle，同一次点击的状态就被预改写了
+     *（表现为点人物时卡片闪一下就没了）。所以只在透明处/非人物区域收起。
+     */
+    if (portraitAlphaAt(event.clientX, event.clientY) >= PORTRAIT_ALPHA_MIN) return;
     if (el.msgNav && el.msgNav.classList.contains('auto-hidden')) return;
     hideBubble(true);
   }, { passive: true, capture: true });
@@ -2962,6 +3953,9 @@ function systemNote(text) {
 
 let audio = null;
 
+/** 同时进行的 TTS 请求上限：1 段在播 + 最多 2 段预取。 */
+const TTS_PREFETCH_MAX = 2;
+
 function ensureAudio() {
   if (!audio) {
     audio = new Audio();
@@ -2970,16 +3964,14 @@ function ensureAudio() {
       state.playing = true;
       el.portrait.classList.add('speaking');
     });
-    audio.addEventListener('ended', () => {
-      state.playing = false;
-      el.portrait.classList.remove('speaking');
-      drainQueue();
-    });
-    audio.addEventListener('error', () => {
-      state.playing = false;
-      el.portrait.classList.remove('speaking');
-      drainQueue();
-    });
+    /*
+     * 这里**不再**挂全局 ended/error 去 drainQueue。
+     *
+     * 旧实现让共享 player 的全局回调先启动下一段，再运行上一段的 once 清理，
+     * 两段会抢同一个 player；stopVoice 也无法只清掉某一代的监听。
+     * 现在每一段自己在 playSegment 里挂 ended/error（带 finished 幂等标记），
+     * 结束清理与下一段启动只有一个所有者、只发生一次。
+     */
   }
   return audio;
 }
@@ -2995,6 +3987,9 @@ function unlockAudio() {
       state.audioUnlocked = true;
       hideHint();
       player.pause();
+      // 用户手势解锁成功后：先用已准备好的当前音频（不重新 POST 合成），
+      // 没有准备结果才按队列继续。
+      if (typeof playPreparedAudio === 'function' && playPreparedAudio()) return;
       drainQueue();
     }).catch(() => {
       showHintOnce();
@@ -3012,6 +4007,141 @@ function renderQuickActions() {
   if (el.quickVoice) {
     el.quickVoice.textContent = state.voiceEnabled ? '语音：开' : '语音：关';
     el.quickVoice.classList.toggle('on', state.voiceEnabled);
+  }
+}
+
+/** 语音任务代际：静音/停止/切角色/页面销毁都会 +1，让在途结果作废。 */
+function bumpVoiceEpoch() {
+  state.voiceEpoch = (state.voiceEpoch || 0) + 1;
+  return state.voiceEpoch;
+}
+
+function voiceEpoch() {
+  return state.voiceEpoch || 0;
+}
+
+/** 相同角色 + tone + 文本视为同一段，可复用预取/服务端缓存。 */
+function ttsKey(segment) {
+  return (segment.characterId || '') + '\u0000' + (segment.tone || '')
+    + '\u0000' + (segment.rawText || '');
+}
+
+/** 发起一次 TTS 请求；signal 用于静音/停止时取消等待。 */
+function ttsRequest(segment, signal) {
+  return fetch(api('/api/tts'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Sakura-Remote-Token': TOKEN },
+    body: JSON.stringify({
+      token: TOKEN,
+      character_id: segment.characterId,
+      text: segment.rawText,
+      tone: segment.tone,
+    }),
+    signal: signal,
+  }).then(async (response) => {
+    if (!response.ok) {
+      let message = '语音合成失败';
+      try {
+        const data = await response.json();
+        if (data && data.error) message = data.error;
+      } catch (error) { /* 保持默认文案 */ }
+      throw new Error(message);
+    }
+    return response.blob();
+  });
+}
+
+/** 所有在途 TTS 任务的登记表（当前段 + 预取）；stopVoice 用它统一取消。 */
+function ttsTaskRegistry() {
+  if (!state.ttsTasks || typeof state.ttsTasks.set !== 'function') {
+    state.ttsTasks = new Map();
+  }
+  return state.ttsTasks;
+}
+
+/** 去敏计数（报告/调试用）；state 没带就惰性建。 */
+function voiceStats() {
+  if (!state.ttsStats || typeof state.ttsStats !== 'object') {
+    state.ttsStats = { requests: 0, prefetches: 0, reused: 0, aborted: 0 };
+  }
+  return state.ttsStats;
+}
+
+/**
+ * 发起一次 TTS 并登记为**可取消任务**。
+ *
+ * 每个任务有自己的 id/epoch/AbortController；结果包成
+ * {ok, blob} / {ok:false, error}，绝不抛出。任务结算只注销自己，
+ * 因此 stopVoice 清表之后，旧任务的完成回调不会改动新任务的任何计数。
+ */
+function startTts(segment, epoch) {
+  voiceStats().requests += 1;
+  const id = (state.voiceTaskSeq || 0) + 1;
+  state.voiceTaskSeq = id;
+  const task = {
+    id: id,
+    epoch: epoch,
+    key: ttsKey(segment),
+    segment: segment,
+    controller: null,
+    promise: null,
+    cleanup: null,
+  };
+  if (typeof AbortController === 'function') {
+    task.controller = new AbortController();
+  }
+  ttsTaskRegistry().set(id, task);
+  task.promise = ttsRequest(segment, task.controller ? task.controller.signal : undefined)
+    .then((blob) => ({ ok: true, blob: blob }))
+    .catch((error) => ({ ok: false, error: error }))
+    .then((result) => {
+      // 只注销自己；stopVoice 已清表时这是无操作，不会动新任务
+      ttsTaskRegistry().delete(id);
+      return result;
+    });
+  return task;
+}
+
+/** 取消一个任务：注销 → abort → 执行它自己的清理（幂等）。 */
+function cancelVoiceTask(task) {
+  if (!task) return;
+  ttsTaskRegistry().delete(task.id);
+  if (state.ttsPrefetch && state.ttsPrefetch.get
+      && state.ttsPrefetch.get(task.key) === task) {
+    state.ttsPrefetch.delete(task.key);
+  }
+  if (task.controller) {
+    try {
+      task.controller.abort();
+      voiceStats().aborted += 1;
+    } catch (error) { /* 忽略 */ }
+  }
+  const cleanup = task.cleanup;
+  task.cleanup = null;
+  if (typeof cleanup === 'function') cleanup();
+}
+
+/**
+ * 有界预取后续语音。
+ *
+ * 只在**当前段真的开始播放之后**调用：首段优先，预取绝不挤占它；
+ * 最多预取 TTS_PREFETCH_MAX 段（current 不计入 prefetch 上限）。
+ */
+function prefetchUpcoming(epoch) {
+  if (epoch !== voiceEpoch()) return;
+  if (!state.voiceEnabled || !state.audioUnlocked) return;
+  if (!state.ttsPrefetch || typeof state.ttsPrefetch.set !== 'function') {
+    state.ttsPrefetch = new Map();
+  }
+  const limit = Math.min(TTS_PREFETCH_MAX, state.pending.length);
+  for (let index = 0; index < limit; index += 1) {
+    if (state.ttsPrefetch.size >= TTS_PREFETCH_MAX) break;
+    const segment = state.pending[index];
+    if (!segment || !segment.rawText) continue;
+    const key = ttsKey(segment);
+    if (state.ttsPrefetch.has(key)) continue;
+    voiceStats().prefetches += 1;
+    state.ttsPrefetch.set(key, startTts(segment, epoch));
   }
 }
 
@@ -3035,49 +4165,85 @@ function drainQueue() {
     }
     return;
   }
-  playSegment(next);
+  playSegment(next, voiceEpoch());
 }
 
-async function playSegment(segment) {
+async function playSegment(segment, epoch) {
+  if (epoch !== voiceEpoch()) return;
   if (!state.audioUnlocked) {
+    // 没解锁：保留待播段，等用户手势后再播，不在这里重复 POST
     state.pending.unshift(segment);
     showHintOnce();
     return;
   }
-  const player = ensureAudio();
+  if (!state.ttsPrefetch || typeof state.ttsPrefetch.get !== 'function') {
+    state.ttsPrefetch = new Map();
+  }
+  // 优先复用预取；否则发起新任务。任务 id 是取消/归属的唯一凭据。
+  // 预取任务完成后会从 ttsTasks 注销，但仍留在 ttsPrefetch 里可复用，
+  // 所以只按 epoch 判断（被取消的预取已从 ttsPrefetch 移除）。
+  const key = ttsKey(segment);
+  let task = state.ttsPrefetch.get(key);
+  if (task && task.epoch === epoch) {
+    state.ttsPrefetch.delete(key);
+    voiceStats().reused += 1;
+  } else {
+    task = startTts(segment, epoch);
+  }
+  // 认领为当前任务所有者：只有它能改 busy/playing/队列
+  state.voiceTask = task;
   state.busy = true;
   setStatus(state.displayName + ' 正在说话…');
+  const player = ensureAudio();
+  let url = '';
+  let finished = false;
+  /** 任务自己的清理：幂等，先拆监听再清 player，绝不自动 drain。 */
+  const cleanup = () => {
+    if (finished) return;
+    finished = true;
+    if (task.cleanup === cleanup) task.cleanup = null;
+    player.removeEventListener('ended', finish);
+    player.removeEventListener('error', finish);
+    if (segment.bubble) {
+      segment.bubble.classList.remove('speaking');
+      // 音频提前结束（或出错）时，别让文字停在半截
+      finishBubbleText(segment.bubble);
+    }
+    if (url) {
+      URL.revokeObjectURL(url);
+      url = '';
+    }
+    if (player === audio) {
+      try { player.pause(); } catch (error) { /* 忽略 */ }
+      try { player.removeAttribute('src'); } catch (error) { /* 忽略 */ }
+      try { player.load(); } catch (error) { /* 忽略 */ }
+    }
+    if (state.voiceTask === task) state.voiceTask = null;
+    if (epoch === voiceEpoch()) {
+      state.playing = false;
+      if (el.portrait) el.portrait.classList.remove('speaking');
+    }
+  };
+  /** 正常结束/出错：清理一次，且只有仍是当前所有者才继续下一句。 */
+  const finish = () => {
+    if (finished) return;
+    const owner = state.voiceTask === task && epoch === voiceEpoch();
+    cleanup();
+    if (owner) drainQueue();
+  };
+  task.cleanup = cleanup;
   try {
-    const response = await fetch(api('/api/tts'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Sakura-Remote-Token': TOKEN },
-      body: JSON.stringify({
-        token: TOKEN,
-        character_id: segment.characterId,
-        text: segment.rawText,
-        tone: segment.tone,
-      }),
-    });
-    if (!response.ok) {
-      let message = '语音合成失败';
-      try {
-        const data = await response.json();
-        if (data && data.error) message = data.error;
-      } catch (error) {
-        message = message;
-      }
-      systemNote(message);
-      state.busy = false;
-      // 合成失败不能连文字都不显示
-      revealBubbleText(segment.bubble, 0);
-      drainQueue();
+    const result = await task.promise;
+    // 旧任务复核：绝不碰新任务的 busy/队列/player
+    if (epoch !== voiceEpoch() || state.voiceTask !== task) {
       return;
     }
-    const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
+    if (!result || !result.ok) {
+      throw (result && result.error) || new Error('语音合成失败');
+    }
+    url = URL.createObjectURL(result.blob);
     segment.bubble.classList.add('speaking');
     setPortrait(segment.tone);
-    player.onended = null;
     player.src = url;
     /*
      * 逐字显示：等到这条语音真的要出声了才开始打字。
@@ -3086,59 +4252,176 @@ async function playSegment(segment) {
      * duration 上会报 Infinity 或 NaN，那就按字数估算 —— revealBubbleText
      * 里会退回 TYPE_FALLBACK_MS 的节奏，不会卡住。
      */
-    let audioSeconds = blob && isFinite(blob.duration) && blob.duration > 0 ? blob.duration : 0;
-    if (!audioSeconds && isFinite(player.duration) && player.duration > 0) {
-      audioSeconds = player.duration;
-    }
+    let audioSeconds = result.blob && isFinite(result.blob.duration) && result.blob.duration > 0
+      ? result.blob.duration : 0;
     try {
       await player.play();
     } catch (error) {
+      // 旧任务的 play 拒绝：只清理自己，不影响新任务
+      if (epoch !== voiceEpoch() || state.voiceTask !== task) {
+        cleanup();
+        return;
+      }
+      /*
+       * 只有「需要用户手势才能出声」这一种失败才回到可点提示；
+       * 同时保存已准备好的音频（blob + objectURL），用户再点一次时直接播放，
+       * 不重新 POST 合成同一段。
+       */
       state.audioUnlocked = false;
-      showHintOnce();
-      state.pending.unshift(segment);
       state.busy = false;
-      // 放不出来也必须把文字显示出来，否则这一条永远是空的
+      state.playing = false;
+      state.voiceTask = null;
+      if (task.cleanup === cleanup) task.cleanup = null;
+      state.preparedUnlock = { segment: segment, blob: result.blob, url: url };
+      url = '';   // 所有权交给 preparedUnlock
+      if (segment.bubble) segment.bubble.classList.remove('speaking');
       revealBubbleText(segment.bubble, 0);
+      showHintOnce();
       return;
+    }
+    if (epoch !== voiceEpoch() || state.voiceTask !== task) {
+      cleanup();
+      return;
+    }
+    if (!audioSeconds && isFinite(player.duration) && player.duration > 0) {
+      audioSeconds = player.duration;
     }
     revealBubbleText(segment.bubble, audioSeconds);
     state.busy = false;
-    const finish = () => {
-      segment.bubble.classList.remove('speaking');
-      // 音频提前结束（或出错）时，别让文字停在半截
-      finishBubbleText(segment.bubble);
-      URL.revokeObjectURL(url);
-      drainQueue();
-    };
-    player.addEventListener('ended', finish, { once: true });
-    player.addEventListener('error', finish, { once: true });
+    player.addEventListener('ended', finish);
+    player.addEventListener('error', finish);
     setStatus('');
+    // 当前段已开始播放：预取后续（首段优先，不挤占）
+    prefetchUpcoming(epoch);
   } catch (error) {
-    systemNote('语音请求失败：' + (error && error.message ? error.message : error));
+    if (epoch !== voiceEpoch() || state.voiceTask !== task) {
+      cleanup();
+      return;
+    }
     state.busy = false;
+    systemNote(error && error.message ? error.message : '语音请求失败');
+    cleanup();
+    // 失败句仍显示文字并继续后续句
     drainQueue();
   }
 }
 
+/**
+ * 用户手势解锁成功后，先播放**已准备好**的当前音频，不重新 POST 合成。
+ *
+ * @return true 表示确实消费了一份准备结果
+ */
+function playPreparedAudio() {
+  const prepared = state.preparedUnlock;
+  if (!prepared) return false;
+  state.preparedUnlock = null;
+  const player = ensureAudio();
+  const epoch = voiceEpoch();
+  const segment = prepared.segment;
+  let url = prepared.url || '';
+  let finished = false;
+  const task = {
+    id: -1, epoch: epoch, key: ttsKey(segment), segment: segment,
+    controller: null, promise: null, cleanup: null,
+  };
+  state.voiceTask = task;
+  state.busy = true;
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    player.removeEventListener('ended', finish);
+    player.removeEventListener('error', finish);
+    if (url) { URL.revokeObjectURL(url); url = ''; }
+    if (segment.bubble) {
+      segment.bubble.classList.remove('speaking');
+      finishBubbleText(segment.bubble);
+    }
+    if (state.voiceTask === task) state.voiceTask = null;
+    state.busy = false;
+    state.playing = false;
+    if (el.portrait) el.portrait.classList.remove('speaking');
+    drainQueue();
+  };
+  task.cleanup = () => {
+    if (finished) return;
+    finished = true;
+    player.removeEventListener('ended', finish);
+    player.removeEventListener('error', finish);
+    if (url) { URL.revokeObjectURL(url); url = ''; }
+    if (state.voiceTask === task) state.voiceTask = null;
+  };
+  segment.bubble.classList.add('speaking');
+  setPortrait(segment.tone);
+  player.src = url;
+  player.addEventListener('ended', finish);
+  player.addEventListener('error', finish);
+  const attempt = player.play();
+  if (attempt && typeof attempt.then === 'function') {
+    attempt.then(() => {
+      state.busy = false;
+      revealBubbleText(segment.bubble,
+        prepared.blob && prepared.blob.duration ? prepared.blob.duration : 0);
+    }).catch(() => {
+      state.busy = false;
+      task.cleanup();
+      // 还是放不出来：保留这份准备结果，等下一次用户手势
+      state.preparedUnlock = { segment: segment, blob: prepared.blob, url: url };
+      showHintOnce();
+    });
+  }
+  return true;
+}
+
 function stopVoice() {
-  // 先把挂起的逐字动画收尾，再清队列。
-  // 顺序反了就遍历到已经被清空的数组，等于没执行。
+  // 换代：所有在途 await 的代际复核都会失败，绝不改新任务状态
+  bumpVoiceEpoch();
+  // 先清理当前任务的 URL/监听（不 drain），再取消所有在途与预取
+  const current = state.voiceTask;
+  state.voiceTask = null;
+  cancelVoiceTask(current);
+  const tasks = Array.from(ttsTaskRegistry().values());
+  ttsTaskRegistry().clear();
+  tasks.forEach((task) => cancelVoiceTask(task));
+  if (state.ttsPrefetch && typeof state.ttsPrefetch.clear === 'function') {
+    state.ttsPrefetch.clear();
+  }
+  const prepared = state.preparedUnlock;
+  state.preparedUnlock = null;
+  if (prepared && prepared.url) {
+    try { URL.revokeObjectURL(prepared.url); } catch (error) { /* 忽略 */ }
+  }
+  if (state.ttsInflight !== undefined) state.ttsInflight = 0;
+  // 再把挂起的逐字动画收尾，最后清队列（顺序反了会遍历到空数组）
   state.pending.forEach(function (seg) { if (seg.bubble) finishBubbleText(seg.bubble); });
   state.pending.length = 0;
   state.busy = false;
-  if (audio) {
-    audio.pause();
-    audio.removeAttribute('src');
-  }
   state.playing = false;
-  el.portrait.classList.remove('speaking');
+  if (audio) {
+    try { audio.pause(); } catch (error) { /* 忽略 */ }
+    try { audio.removeAttribute('src'); } catch (error) { /* 忽略 */ }
+    try { audio.load(); } catch (error) { /* 个别实现没有 load */ }
+  }
+  if (el.portrait) el.portrait.classList.remove('speaking');
+  // 正在播放的那条气泡也要停掉「说话中」样式（音频已 pause）
+  if (el.bubbles && el.bubbles.querySelectorAll) {
+    Array.prototype.forEach.call(
+      el.bubbles.querySelectorAll('.bubble.speaking'),
+      function (node) { node.classList.remove('speaking'); }
+    );
+  }
+  // 注意：停止后**不** drainQueue —— 用户明确停止，不该自动播下一句
 }
 
 /* ---------- 状态与历史 ---------- */
 
 async function loadState() {
   const data = await fetchJson('/api/state');
-  state.characterId = data.characterId || '';
+  const nextCharacter = data.characterId || '';
+  // 切角色：立刻停掉上一角色的语音并取消在途合成，迟到音频不得出声
+  if (state.characterId && nextCharacter && nextCharacter !== state.characterId) {
+    stopVoice();
+  }
+  state.characterId = nextCharacter;
   // 拿不到名字时退回角色 id，再退回一个中性词 —— 不要写死某个角色名
   state.displayName = data.displayName || state.characterId || '角色';
   state.tones = Array.isArray(data.tones) ? data.tones : [];
@@ -3156,9 +4439,27 @@ async function loadState() {
       (entry) => typeof entry[1] === 'string' && entry[1]
     )
   );
-  const initial = state.portraitByKey.get(state.defaultPortraitKey) || state.portraitByKey.values().next().value;
-  if (initial) el.portrait.src = initial;
-  state.currentPortraitKey = state.defaultPortraitKey;
+  const initialKey = state.portraitByKey.has(state.defaultPortraitKey)
+    ? state.defaultPortraitKey
+    : (state.portraitByKey.keys().next().value || '');
+  const initial = initialKey ? state.portraitByKey.get(initialKey) : '';
+  if (initial) {
+    // 首次进入直接指派 src：同步提交 key 并作废此前任何在途加载代次
+    portraitGeneration += 1;
+    el.portrait.src = initial;
+    state.currentPortraitKey = initialKey;
+    state.portraitReady = true;
+    state.portraitFailed = '';
+    window.__sakuraPortraitKey = initialKey;
+    // 初始图也要等真正解码成功才允许原生挂完整窗口：
+    // 这里可能是缓存命中（onload 立即触发），也可能是首次下载。
+    if (typeof el.portrait.addEventListener === 'function') {
+      el.portrait.addEventListener('load', () => notifyPortraitVisibleIfReady(), { once: true });
+    }
+  } else {
+    state.currentPortraitKey = '';
+    state.portraitReady = false;
+  }
   applyTheme(data.theme);
   const settings = data.settings || {};
   state.serverSettings = {
@@ -3173,29 +4474,49 @@ async function loadState() {
   updateVoiceButton();
 }
 
-function renderHistory(items) {
+function renderHistory(items, options = {}) {
   el.bubbles.innerHTML = '';
+  // 记录这批历史属于哪个角色：切换角色/旧请求迟到时不允许串显示
+  if (el.bubbles.dataset) el.bubbles.dataset.characterId = state.characterId || '';
+  let added = 0;
   items.forEach((item) => {
     if (!item) return;
     if (item.role === 'user') {
-      addBubble('user', item.content || '');
+      if (String(item.content || '').trim()) {
+        addBubble('user', item.content || '', { suppressAutoShow: !!options.suppressAutoShow });
+        added += 1;
+      }
     } else if (item.role === 'assistant') {
       const raw = String(item.raw_content || '').trim();
       const shown = String(item.content || '').trim();
-      addBubble('assistant', raw || shown, { secondary: raw ? shown : '' });
+      if (!raw && !shown) return;   // 空占位不渲染，避免顶掉真实对话
+      addBubble('assistant', raw || shown, {
+        secondary: raw ? shown : '', suppressAutoShow: !!options.suppressAutoShow,
+      });
+      added += 1;
     }
   });
+  // 历史为空/全是空占位时保持空状态，而不是留一张空卡片
+  if (!added) syncMessageNav(true);
   scrollBubbles();
 }
 
-async function loadHistory(silent) {
+async function loadHistory(silent, options = {}) {
   if (!state.characterId) return;
+  const requestedCharacter = state.characterId;
+  const requestSeq = (state.historyRequestSeq || 0) + 1;
+  state.historyRequestSeq = requestSeq;
   try {
     const data = await fetchJson(
-      '/api/history?character_id=' + encodeURIComponent(state.characterId) + '&limit=40'
+      '/api/history?character_id=' + encodeURIComponent(requestedCharacter) + '&limit=40'
     );
-    renderHistory(data.history || []);
+    // 迟到的响应：期间角色已切换就不要渲染，避免泄露/串入其他角色对话
+    if (requestedCharacter !== state.characterId || requestSeq !== state.historyRequestSeq) return;
+    if (options.restoreSeq !== undefined
+        && options.restoreSeq !== (state.dialogueRestoreSeq || 0)) return;
+    renderHistory(data.history || [], options);
   } catch (error) {
+    if (requestedCharacter !== state.characterId) return;
     if (!silent) systemNote('历史记录读取失败：' + error.message);
   }
 }
@@ -3253,32 +4574,139 @@ async function uploadImage(file) {
   return result.url || '';
 }
 
-async function send(text, file) {
+/**
+ * 失败时把内容恢复成可编辑草稿。
+ *
+ * 不覆盖用户已经新输入的内容 —— 发送失败后用户往往已经在重新打字。
+ */
+function restoreSendDraft(value) {
+  if (!value) return false;
+  if (!el.text) return false;
+  const current = String(el.text.value || '');
+  if (current.trim()) return false;
+  el.text.value = value;
+  try {
+    el.text.dispatchEvent(new Event('input'));
+  } catch (error) { /* 桩环境没有 Event 时忽略 */ }
+  return true;
+}
+
+/**
+ * 发送失败/结果未知的统一处理。
+ *
+ * 关键区分：
+ *   - 请求**还没发出去**（上传失败、服务端明确报 busy）→ 只是失败，
+ *     恢复草稿让用户重发；
+ *   - 请求**已经发出但响应丢失** → 服务端可能已经完成，标「结果未知」，
+ *     先刷新历史，绝不自动重复请求模型（跨重启也无法声称恰好一次）。
+ */
+function handleSendFailure(error, pending) {
+  const message = error && error.message ? error.message : String(error);
+  const dispatched = !!(pending && pending.chatDispatched);
+  const definitelyRejected = !!(error && error.busy);
+  const unknown = dispatched && !definitelyRejected;
+  if (unknown) {
+    systemNote('结果未知：请求可能已经送达角色，但响应丢失。已先刷新历史；'
+      + '如果历史里没有这条回复，再点发送重试。');
+    // 结果未知先以服务端历史为准，不自动重发
+    if (typeof loadHistory === 'function') loadHistory(true);
+  } else {
+    systemNote(message);
+  }
+  const restored = restoreSendDraft(pending && pending.text);
+  if (restored) {
+    setStatus('发送失败，内容已保留，可再次发送重试。');
+    setTimeout(() => setStatus(''), 2600);
+  } else {
+    setStatus('');
+  }
+}
+
+/** 当前待发附件（选择图片/拍照或截图）；没有就返回 null。 */
+function pendingAttachmentOf() {
+  const media = state.pendingMedia;
+  if (media && (media.kind === 'file' || media.kind === 'shot')) return media;
+  // 网页 input 里可能还有没走 onPickedFile 的文件（拍照与图库两个入口）
+  const source = activeMediaInput(null);
+  const file = source && source.files && source.files[0];
+  if (file) {
+    return { kind: 'file', name: describePickedFile(file), file: file, thumb: '', dataUrl: '' };
+  }
+  return null;
+}
+
+/**
+ * 上传待发附件，返回服务端资源地址。
+ *
+ * 结果缓存在 `media.asset`：聊天请求失败后重试时复用已上传地址，不重复上传；
+ * 上传失败则抛错，附件原样保留（用户可重试或替换）。
+ */
+async function uploadPendingAttachment(media) {
+  if (media.asset) return media.asset;
+  let asset = '';
+  if (media.kind === 'shot' && media.dataUrl) {
+    const match = /^data:([^;,]+);base64,(.*)$/.exec(media.dataUrl);
+    if (!match) throw new Error('截图格式无法识别。');
+    setStatus('正在上传截图…');
+    const result = await postJson('/api/upload', {
+      media_type: match[1].toLowerCase(),
+      data: match[2],
+    });
+    asset = result.url || '';
+  } else if (media.file) {
+    setStatus('正在上传图片…');
+    asset = await uploadImage(media.file);
+  } else {
+    throw new Error('附件已失效，请重新选择。');
+  }
+  if (!asset) throw new Error('上传没有返回地址');
+  media.asset = asset;
+  return asset;
+}
+
+async function send(text) {
   const value = String(text || '').trim();
-  if (!value && !file) return;
+  const media = pendingAttachmentOf();
+  if (!value && !media) return;
+  // 函数级防重复：回车连击/脚本调用都拦得住
+  if (state.sending) {
+    systemNote('上一条还在发送中，请稍候。');
+    return;
+  }
+  state.sending = true;
+  const requestId = 'send-' + (++state.sendSeq) + '-' + Date.now().toString(36);
+  const pending = { text: value, media: media, requestId: requestId, chatDispatched: false };
+  state.pendingSend = pending;
   el.send.disabled = true;
   stopVoice();
   unlockAudio();
   let attachment = '';
+  let thinking = null;
   try {
-    if (file) {
-      setStatus('正在上传图片…');
-      attachment = await uploadImage(file);
-    }
-    addBubble('user', value + (file ? '\n（已附加图片）' : ''));
-    el.text.value = '';
-    el.image.value = '';
-    el.image.classList.remove('selected');
-    // 图已经发出去了，提示条也该收起来
-    clearMediaInfo();
-    const thinking = addBubble('assistant', '', { typing: true });
+    if (media) attachment = await uploadPendingAttachment(media);
+    const label = media ? (media.kind === 'shot' ? '（手机截屏）' : '（已附加图片）') : '';
+    addBubble('user', value + (label ? '\n' + label : ''));
+    // 文本先清空；附件要等**整条消息成功**才清，失败可原样重试
+    if (el.text) el.text.value = '';
+    thinking = addBubble('assistant', '', { typing: true });
     setStatus(state.displayName + ' 正在思考…');
+    pending.chatDispatched = true;
     const data = await postJson('/api/chat', {
       character_id: state.characterId,
       text: value,
       image_url: attachment,
     });
     thinking.row.remove();
+    thinking = null;
+    // 成功才清空附件；且必须是本次这个对象 ——
+    // 发送期间用户新选的图片不能被误删
+    if (media && state.pendingMedia === media) {
+      releaseMediaInfo(media);
+      state.pendingMedia = null;
+      showMediaInfo(null);
+    }
+    // 成功才清空附件；拍照与图库两个 input 都要清，否则下次提交会带上旧文件
+    clearMediaInputs();
     const segments = segmentsFromReply(data);
     for (const segment of segments) {
       // deferText：先建空气泡，等这段语音播放时再逐字填
@@ -3292,13 +4720,18 @@ async function send(text, file) {
       if (!state.voiceEnabled) await sleep(180);
     }
     if (!segments.length) systemNote('（这条回复没有可显示内容）');
+    state.pendingSend = null;   // 成功：草稿记录作废
     setStatus('');
     if (state.voiceEnabled && !state.audioUnlocked) showHintOnce();
   } catch (error) {
-    const message = error && error.message ? error.message : String(error);
-    systemNote(message);
-    setStatus('');
+    // 无论成功失败都先清掉「正在思考」占位，避免它永远转圈
+    if (thinking) {
+      thinking.row.remove();
+      thinking = null;
+    }
+    handleSendFailure(error, pending);
   } finally {
+    state.sending = false;
     el.send.disabled = false;
     state.dirtyPlayback = true;
   }
@@ -3308,8 +4741,7 @@ async function send(text, file) {
 
 el.form.addEventListener('submit', (event) => {
   event.preventDefault();
-  const file = el.image.files && el.image.files[0];
-  send(el.text.value, file);
+  send(el.text.value);
 });
 
 el.text.addEventListener('input', () => {
@@ -3349,6 +4781,9 @@ el.clearButton.addEventListener('click', () => {
 
 document.addEventListener('touchstart', unlockAudio, { passive: true });
 document.addEventListener('click', unlockAudio);
+
+// 页面销毁/离开：取消在途语音，迟到音频不得出声（对象 URL 由各段释放）
+window.addEventListener('pagehide', () => { stopVoice(); });
 
 /* ---------- 配置页事件 ---------- */
 
@@ -3390,12 +4825,6 @@ bindControl(el.dialogYRange, el.dialogYNumber,
   (value) => applyDialogShift(state.dialogX, value));
 bindControl(el.bubbleHideRange, el.bubbleHideNumber, applyBubbleHideDelay);
 
-if (el.floatToggle) {
-  el.floatToggle.addEventListener('change', () => {
-    applyPortraitFloat(el.floatToggle.checked);
-  });
-}
-
 if (el.saveAllButton) {
   el.saveAllButton.addEventListener('click', saveAllDisplaySettings);
 }
@@ -3403,6 +4832,14 @@ if (el.saveAllButton) {
 if (el.pressFeedbackToggle) {
   el.pressFeedbackToggle.addEventListener('change', () => {
     setPressFeedbackEnabled(el.pressFeedbackToggle.checked);
+  });
+}
+
+/* 透明处穿透开关：默认在 API33+ 的悬浮窗里开启，随时可关掉恢复整窗交互。 */
+if (el.passThroughToggle) {
+  el.passThroughToggle.addEventListener('change', () => {
+    state.passThroughDirty = true;   // 用户本次真的动过 → 保存时允许写原生
+    setPassThroughEnabled(el.passThroughToggle.checked);
   });
 }
 
@@ -3419,14 +4856,19 @@ if (el.pressFeedbackToggle) {
 function requestScreenPermission() {
   if (el.screenPermHint) el.screenPermHint.textContent = '正在请求系统授权…';
   const native = nativeBridge();
-  if (!native || typeof native.requestScreenPermission !== 'function') {
+  if (!native || (typeof native.requestScreenPermission !== 'function'
+      && typeof native.requestScreenPermissionWithSession !== 'function')) {
     if (el.screenPermHint) {
       el.screenPermHint.textContent = '截屏授权需要在手机 App 内操作（当前是悬浮窗页面）。';
     }
     return;
   }
   try {
-    native.requestScreenPermission();
+    if (typeof native.requestScreenPermissionWithSession === 'function') {
+      native.requestScreenPermissionWithSession(PAGE_SESSION_ID);
+    } else {
+      native.requestScreenPermission();
+    }
   } catch (error) {
     if (el.screenPermHint) {
       el.screenPermHint.textContent = '请求失败：' + (error && error.message ? error.message : error);
@@ -3441,9 +4883,11 @@ function requestScreenPermission() {
       if (typeof native.hasScreenPermission === 'function') granted = native.hasScreenPermission();
     } catch (error) { granted = null; }
     if (granted === true) {
-      el.screenPermHint.textContent = '已获得截屏权限，现在可以正常「截取屏幕」了。';
-    } else if (granted === false) {
-      el.screenPermHint.textContent = '尚未获得授权。请点上面的按钮，并在系统弹窗里选择「立即开始」。';
+      el.screenPermHint.textContent = '截图任务正在进行中。';
+    } else {
+      // 每次都重新授权：不再声称「授过一次以后就免弹」
+      el.screenPermHint.textContent =
+        '系统每次截图都会重新确认一次。点了「截取屏幕」后在系统弹窗里选「立即开始」即可。';
     }
   }, 2500);
 }
@@ -3495,20 +4939,24 @@ if (el.mediaToggle) {
     setMediaMenuOpen(el.mediaPanel && el.mediaPanel.classList.contains('hidden'));
   });
 }
-if (el.image) {
-  // 选完图片就收起菜单，否则菜单会一直盖在输入框上方
-  el.image.addEventListener('change', () => {
-  closeMediaMenu();
-  onPickedFile();
-});
-if (el.mediaInfoClear) {
-  el.mediaInfoClear.addEventListener('click', () => {
-    // 取消已选图片：清空 input 里的文件，否则提交时还会带上
-    if (el.image) el.image.value = '';
-    el.image && el.image.classList.remove('selected');
-    clearMediaInfo();
+/* 拍照 / 图库两个入口：都走同一套「本地预览 + 点发送才上传」流程 */
+function wireMediaInput(input) {
+  if (!input) return;
+  // 选完图片/拍完照就收起菜单，否则菜单会一直盖在输入框上方
+  input.addEventListener('change', () => {
+    closeMediaMenu();
+    onPickedFile(input);
   });
 }
+wireMediaInput(el.image);
+wireMediaInput(el.camera);
+
+if (el.mediaInfoClear) {
+  el.mediaInfoClear.addEventListener('click', () => {
+    // 取消已选图片：清空拍照/图库两个 input，否则提交时还会带上旧文件
+    clearMediaInputs();
+    clearMediaInfo();
+  });
 }
 if (el.mediaPanel) {
   // 点菜单内部不要触发「点空白关闭」
@@ -3669,16 +5117,13 @@ async function boot() {
   attachPinchZoom();
   // 把当前地址回报给原生，作为悬浮窗配置的兜底（两个源不互通）
   installBridgeCallbacks();
+  registerPageSession();
   reportUrlToNative();
   // 悬浮窗模式：切换紧凑布局并接管软键盘
   applyOverlayMode();
   // 迷你图标模式：只剩一个圆形头像
-  applyBubbleMode();
-  // 再应用一次显示偏好。
-  // 上一行之前的 loadDisplayPrefs() 跑在 applyOverlayMode() 之前，
-  // 那时 body 上还没有 overlay-mode，随后的模式切换/布局都会重建样式状态；
-  // 不在模式确定后重放一次，就会出现「浮动开关点了没反应」
-  //（实测存储里 portraitFloat=true，body 上却还挂着 no-float）。
+  applyBubbleMode();  // 再应用一次显示偏好。
+  // 模式确定后再次同步显示偏好；旧浮动值只走兼容禁用路径。
   loadDisplayPrefs();
   // 悬浮窗手势与内容宽度跟随
   if (document.body.classList.contains('overlay-mode')) {
@@ -3693,20 +5138,43 @@ async function boot() {
     // 首次进来先显示最新一条
     syncMessageNav(true);
   }
+  // 精确局部穿透：只在悬浮窗/小球页面有意义。模块会先冻结位移动画，
+  // 再扫描 alpha 轮廓并提交给原生（API33+ 才真正生效）。
+  if ((document.body.classList.contains('overlay-mode')
+      || document.body.classList.contains('bubble-mode'))
+      && window.SakuraTouchRegion
+      && typeof window.SakuraTouchRegion.install === 'function') {
+    try {
+      window.SakuraTouchRegion.install();
+    } catch (error) {
+      systemNote('穿透初始化失败，保持整窗交互。');
+    }
+  }
   // 支持 ?config=1 直接展开配置页：方便大屏适配验证和分享「怎么配置」给别人看
   const params = new URLSearchParams(window.location.search);
   const wantConfig = params.get('config') === '1';
   try {
     await loadState();
     await loadHistory(true);
+    // 历史加载完成后再定位一次：确保首次打开/关闭重开都显示当前角色最近的有效对话，
+    // 而不是空的占位行。
+    if (document.body.classList.contains('overlay-mode')) {
+      syncMessageNav(true);
+    }
     if (state.voiceEnabled && state.autoplay) unlockAudio();
     renderConfig();
   } catch (error) {
     systemNote('初始化失败：' + (error && error.message ? error.message : error));
     setStatus('无法连接电脑端，请确认 Sakura 正在运行。');
     renderConfig();
+    // 明确上报 boot 失败：原生据此立即把完整窗口降为有界恢复卡片，
+    // 绝不留下「看不到内容却拦点击」的透明大窗。
+    if (typeof notifyRenderSession === 'function') notifyRenderSession('bootFailed');
   }
   if (wantConfig) openConfig(true);
+  // boot 完成（DOM、模式、历史都就绪）：通知原生「页面已就绪」。
+  // 注意这只代表 boot 完成，不代表有可见立绘 —— 完整窗口仍等立绘可见信号。
+  if (typeof notifyRenderSession === 'function') notifyRenderSession('bootOk');
 }
 
 boot();

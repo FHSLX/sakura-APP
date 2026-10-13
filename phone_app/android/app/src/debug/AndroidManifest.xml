@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Debug-only manifest overlay.
+
+  TouchRegionProbeActivity exists only to verify the R2 precise touch-region
+  feature on a real device with a synthetic image and known rectangles. It must
+  never ship in the release build, so it lives in the debug source set only.
+
+  exported="true" is required so the documented device check can launch it from
+  the adb shell (`am start -n com.sakura.remote/.TouchRegionProbeActivity`).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <activity
+            android:name=".TouchRegionProbeActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:label="TouchRegion 探针 (debug)" />
+    </application>
+</manifest>

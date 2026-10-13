@@ -133,7 +133,10 @@ store.clear();
 api.loadPortraitScale();
 check('无本地值时读原生缩放', state.portraitScale === 1.25, state.portraitScale);
 
-// 6) CSS 必须让缩放落在外层容器，且动画只在内层 img 上
+// 6) CSS 必须让缩放落在外层容器；#portrait 只负责位移，不参与缩放。
+//    上下浮动（breathe/speak）已按用户要求移除，因此 #portrait 上不应再有
+//    animation —— 旧断言「只做动画」在移除浮动后必然失败，这里改为断言
+//    「没有动画、没有 scale()、位移由 --pet-lift 驱动」，比旧断言更贴合现状。
 const css = fs.readFileSync(path.join(PLUGIN_ROOT, 'static', 'app.css'), 'utf8');
 function ruleFor(selector) {
   const match = css.match(new RegExp(selector.replace(/[.#]/g, '\\$&') + '\\s*\\{([^}]*)\\}'));
@@ -145,9 +148,11 @@ check('#portraitWrap 使用 scale(var(--pet-scale))',
   /scale\(var\(--pet-scale/.test(wrapRule), wrapRule.slice(0, 120));
 check('#portraitWrap 上了动画的 transform', /transform/.test(wrapRule) && !/animation/.test(wrapRule),
   { hasTransform: /transform/.test(wrapRule), hasAnimation: /animation/.test(wrapRule) });
-check('#portrait 只做动画，不写 scale()',
-  /animation/.test(portraitRule) && !/scale\(/.test(portraitRule),
-  { hasAnimation: /animation/.test(portraitRule), hasScale: /scale\(/.test(portraitRule) });
+check('#portrait 不写 scale()，且浮动动画已移除',
+  !/scale\(/.test(portraitRule) && !/animation/.test(portraitRule)
+  && /--pet-lift/.test(portraitRule),
+  { hasAnimation: /animation/.test(portraitRule), hasScale: /scale\(/.test(portraitRule),
+    hasLift: /--pet-lift/.test(portraitRule) });
 
 console.log();
 if (failures.length) {

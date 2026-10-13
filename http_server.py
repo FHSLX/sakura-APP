@@ -12,6 +12,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import posixpath
 import re
 import secrets
 import socket
@@ -21,7 +22,7 @@ import time
 from collections import deque
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Mapping
 from urllib.parse import parse_qs, quote, urlparse
 
@@ -74,6 +75,119 @@ _IMAGE_UPLOAD_TYPES = {
 }
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 
+# 新版角色包用 visuals.resources[] 声明视觉资源：root + entry 指向配置 JSON，
+# 图片路径相对 root（见宿主内置 sakura_portrait 插件的 PortraitService.describe）。
+PORTRAIT_RESOURCE_TYPE = "sakura.visual.portrait@1"
+PORTRAIT_DEFAULT_KEY = "__default__"
+PORTRAIT_LEGACY_RESOURCE_ID = "portrait-default"
+PORTRAIT_LEGACY_ENTRY = "character.json"
+PORTRAIT_CACHE_ENTRIES = 64
+# 与宿主 app.config.character_resources / app.plugins.visuals 一致：
+# id 是 [A-Za-z0-9][A-Za-z0-9_.-]{0,127}，type 是 <name>@<正整数>。
+_VISUAL_RESOURCE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+_VISUAL_RESOURCE_TYPE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}@[1-9][0-9]{0,5}$")
+_VISUAL_PATH_FORBIDDEN = re.compile(r'[<>:"|?*\x00-\x1f]')
+
+
+def _visual_relative_path(value: object, *, allow_root: bool = False) -> str:
+    """镜像宿主 app.plugins.visuals.relative_resource_path 的校验。
+
+    root='.' 是唯一允许的“包根”写法；其余路径不得越出角色包。
+    """
+
+    if not isinstance(value, str) or not value:
+        raise ValueError("VISUAL_PATH_INVALID")
+    if allow_root and value == ".":
+        return value
+    if (
+        "\\" in value
+        or PurePosixPath(value).is_absolute()
+        or PureWindowsPath(value).drive
+        or any(part in {"", ".", ".."} for part in value.split("/"))
+        or _VISUAL_PATH_FORBIDDEN.search(value)
+        or any(part.endswith((" ", ".")) for part in value.split("/"))
+    ):
+        raise ValueError("VISUAL_PATH_INVALID")
+    return value
+
+
+def _portrait_image_path(value: object) -> str:
+    """镜像内置 sakura_portrait 插件对资源配置里图片路径的校验。"""
+
+    if (
+        not isinstance(value, str)
+        or not value
+        or "\\" in value
+        or PurePosixPath(value).is_absolute()
+        or PureWindowsPath(value).drive
+        or any(part in {"", ".", ".."} for part in value.split("/"))
+        or any(char in value for char in ":\x00")
+    ):
+        raise ValueError("VISUAL_RESOURCE_INVALID")
+    return value
+
+
+def _legacy_portrait_image_path(value: object) -> str:
+    """旧 character.json 的 portrait 路径允许引号/反斜杠，先归一化再校验。"""
+
+    if not isinstance(value, str):
+        raise ValueError("VISUAL_RESOURCE_INVALID")
+    raw = value.strip().strip('"').strip("'").replace("\\", "/")
+    if PurePosixPath(raw).is_absolute() or PureWindowsPath(raw).drive:
+        raise ValueError("VISUAL_RESOURCE_INVALID")
+    return _portrait_image_path(posixpath.normpath(raw))
+
+
+def _is_heic_or_avif(payload: bytes) -> bool:
+    # ISO-BMFF：4 字节 box 长度 + 'ftyp'
+    return len(payload) >= 12 and payload[4:8] == b"ftyp"
+
+
+def _image_payload_matches(suffix: str, payload: bytes) -> bool:
+    """检查文件内容确实是该扩展名对应的图片格式。
+
+    为什么必须查：旧实现把 visuals 的 entry（resource.json）当图片路径直接读出来，
+    只要扩展名对不上就可能把文本配置当图片发出去。这里在发送前挡住。
+    """
+
+    head = payload[:16]
+    if suffix == ".png":
+        return head.startswith(b"\x89PNG\r\n\x1a\n")
+    if suffix in {".jpg", ".jpeg"}:
+        return head.startswith(b"\xff\xd8\xff")
+    if suffix == ".gif":
+        return head.startswith((b"GIF87a", b"GIF89a"))
+    if suffix == ".bmp":
+        return head.startswith(b"BM")
+    if suffix == ".webp":
+        return len(payload) >= 12 and payload[:4] == b"RIFF" and payload[8:12] == b"WEBP"
+    if suffix == ".avif":
+        return _is_heic_or_avif(payload)
+    return False
+
+
+class _PortraitSelection:
+    """当前角色选中形态的解析结果（只含公开视觉信息）。"""
+
+    __slots__ = ("resource_id", "resource_type", "root", "entry", "paths", "signature")
+
+    def __init__(
+        self,
+        resource_id: str,
+        resource_type: str,
+        root: str,
+        entry: str,
+        paths: dict[str, str],
+        signature: str,
+    ) -> None:
+        self.resource_id = resource_id
+        self.resource_type = resource_type
+        self.root = root
+        self.entry = entry
+        self.paths = paths
+        # 选中形态 + 配置文件内容指纹：任一变化都让立绘字节缓存失效。
+        self.signature = signature
+
 # 立绘名和语气名不一定对得上（例如语气「中性」没有明显的立绘关键词）。
 # 这里只给出跨角色都安全的最小默认，用户可以用插件数据目录里的
 # portrait_map.json 覆盖，key 是语气名，value 是立绘 key。
@@ -89,6 +203,19 @@ class RemoteBusyError(RuntimeError):
 
 class RemoteUnavailableError(RuntimeError):
     """宿主能力不可用时抛出。"""
+
+
+class PortraitUnavailableError(RemoteUnavailableError):
+    """当前角色没有可用的静态立绘。
+
+    这是**可恢复状态**而不是服务故障：/api/state 必须照常返回，
+    否则手机端 loadState() 会把整页显示成「无法连接电脑端」。
+    `code` 是去敏分类，用于日志与状态展示，不带路径/内容。
+    """
+
+    def __init__(self, message: str, code: str = "portrait_unavailable") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def manifest_path(value: Path) -> Path:
@@ -279,7 +406,10 @@ class RemoteService:
         self._portrait_cache: dict[str, tuple[str, bytes]] = {}
         self._tts_cache: dict[str, Path] = {}
         self._tts_lock = threading.RLock()
-        self._character_cache: dict[str, Any] = {}
+        # 相同 cache_key 的在途请求合并：只有一个 leader 真正调用 TTS，
+        # 其余等待同一个结果。失败时 leader 会清掉自己，后续请求可重试。
+        self._tts_inflight: dict[str, threading.Event] = {}
+        self._character_cache: dict[str, tuple[tuple[int, int], dict[str, Any]]] = {}
 
     # ---- 日志 -----------------------------------------------------
 
@@ -607,47 +737,195 @@ class RemoteService:
         }
 
     def _manifest(self, character_id: str) -> dict[str, Any]:
+        try:
+            manifest_path = Path(
+                self.characters.resolve_resource(character_id, PORTRAIT_LEGACY_ENTRY)
+            )
+        except Exception as error:  # noqa: BLE001 - 宿主异常类型不稳定，统一降级
+            raise RemoteUnavailableError("角色配置读取失败。") from error
+        try:
+            stat = manifest_path.stat()
+            signature = (stat.st_mtime_ns, stat.st_size)
+        except OSError as error:
+            raise RemoteUnavailableError("角色配置读取失败。") from error
         with self._state_lock:
             cached = self._character_cache.get(character_id)
-            if cached is not None:
-                return cached
-        manifest_path = Path(
-            self.characters.resolve_resource(character_id, "character.json")
-        )
+            if cached is not None and cached[0] == signature:
+                return cached[1]
         try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            # utf-8-sig：宿主某些角色包写入了 BOM，严格 utf-8 会解析失败。
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError) as error:
             raise RemoteUnavailableError("角色配置读取失败。") from error
         if not isinstance(manifest, dict):
             raise RemoteUnavailableError("角色配置格式无效。")
         with self._state_lock:
-            self._character_cache[character_id] = manifest
+            self._character_cache[character_id] = (signature, manifest)
         return manifest
 
-    def _portrait_map(self, character_id: str) -> dict[str, str]:
-        manifest = self._manifest(character_id)
-        portrait = manifest.get("portrait")
-        result: dict[str, str] = {}
-        if isinstance(portrait, Mapping):
-            default = portrait.get("default")
-            if isinstance(default, str) and default.strip():
-                result["__default__"] = default.strip()
-            expressions = portrait.get("expressions")
-            if isinstance(expressions, Mapping):
-                for key, value in expressions.items():
-                    if isinstance(key, str) and isinstance(value, str) and value.strip():
-                        result[key] = value.strip()
-        visuals = manifest.get("visuals")
-        if not result and isinstance(visuals, Mapping):
-            for resource in visuals.get("resources") or []:
-                if not isinstance(resource, Mapping):
-                    continue
-                entry = resource.get("entry")
-                if isinstance(entry, str) and entry.strip():
-                    result[str(resource.get("name") or "立绘")] = entry.strip()
-        if not result:
-            raise RemoteUnavailableError("当前角色没有可用立绘。")
+    @staticmethod
+    def _normalize_visual_resource(item: Any) -> dict[str, str]:
+        """按宿主 CharacterVisualResource.from_mapping 的规则归一化一个视觉资源。"""
+
+        if not isinstance(item, Mapping) or not {"id", "type", "root", "entry"} <= set(item):
+            raise ValueError("VISUAL_RESOURCE_INVALID")
+        resource_id = item.get("id")
+        resource_type = item.get("type")
+        name = item.get("name", "")
+        if (
+            not isinstance(resource_id, str)
+            or not _VISUAL_RESOURCE_ID.fullmatch(resource_id)
+            or not isinstance(resource_type, str)
+            or not _VISUAL_RESOURCE_TYPE.fullmatch(resource_type)
+            or not isinstance(name, str)
+        ):
+            raise ValueError("VISUAL_RESOURCE_INVALID")
+        return {
+            "id": resource_id,
+            "type": resource_type,
+            "root": _visual_relative_path(item.get("root"), allow_root=True),
+            "entry": _visual_relative_path(item.get("entry")),
+            "name": name.strip()
+            or (
+                "立绘1"
+                if resource_id == PORTRAIT_LEGACY_RESOURCE_ID
+                and resource_type == PORTRAIT_RESOURCE_TYPE
+                else ""
+            ),
+        }
+
+    def _select_visual_resource(
+        self, manifest: Mapping[str, Any]
+    ) -> tuple[dict[str, str] | None, list[dict[str, str]]]:
+        """遵循宿主 character_visual_resources 的语义选出当前形态。
+
+        - 有 visuals 时只认 visuals（host 同样忽略 portrait）；
+        - 按 visuals.default 对应的资源 id 选择，缺失时取第一项而不是末项；
+        - 重复 id、无效默认 id、providers 不合法都视为配置无效。
+        """
+
+        if "visuals" not in manifest:
+            portrait = manifest.get("portrait")
+            if portrait is None:
+                return None, []
+            if not isinstance(portrait, Mapping):
+                raise ValueError("VISUAL_RESOURCE_INVALID")
+            legacy = {
+                "id": PORTRAIT_LEGACY_RESOURCE_ID,
+                "type": PORTRAIT_RESOURCE_TYPE,
+                "root": ".",
+                "entry": PORTRAIT_LEGACY_ENTRY,
+                "name": "立绘1",
+            }
+            return legacy, [legacy]
+        raw = manifest.get("visuals")
+        if not isinstance(raw, Mapping) or not isinstance(raw.get("resources"), list):
+            raise ValueError("VISUAL_RESOURCE_INVALID")
+        resources = [self._normalize_visual_resource(item) for item in raw["resources"]]
+        ids = [resource["id"] for resource in resources]
+        providers = raw.get("providers", {})
+        if (
+            len(set(ids)) != len(ids)
+            or not isinstance(providers, Mapping)
+            or set(providers) - set(ids)
+            or any(
+                not isinstance(value, str) or not _VISUAL_RESOURCE_ID.fullmatch(value)
+                for value in providers.values()
+            )
+        ):
+            raise ValueError("VISUAL_RESOURCE_INVALID")
+        selected_id = raw.get("default")
+        if selected_id is not None and (
+            not isinstance(selected_id, str) or selected_id not in ids
+        ):
+            raise ValueError("VISUAL_RESOURCE_INVALID")
+        if resources and selected_id is None:
+            selected_id = resources[0]["id"]
+        selected = next(
+            (resource for resource in resources if resource["id"] == selected_id), None
+        )
+        return selected, resources
+
+    @staticmethod
+    def _portrait_configuration(config: Any, *, legacy: bool) -> dict[str, str]:
+        """解析形态配置的 default/expressions，与内置 sakura_portrait 语义一致。"""
+
+        if not isinstance(config, Mapping):
+            raise ValueError("VISUAL_RESOURCE_INVALID")
+        if "expressionRows" in config:
+            # 宿主把未完成的表情标签草稿判为无效，不能拿来冒充可用立绘。
+            raise ValueError("VISUAL_RESOURCE_INVALID")
+        path_value = _legacy_portrait_image_path if legacy else _portrait_image_path
+        default = path_value(config.get("default"))
+        expressions = config.get("expressions") or {}
+        if not isinstance(expressions, Mapping):
+            raise ValueError("VISUAL_RESOURCE_INVALID")
+        result: dict[str, str] = {PORTRAIT_DEFAULT_KEY: default}
+        for label, path in expressions.items():
+            if (
+                not isinstance(label, str)
+                or not label.strip()
+                or label == PORTRAIT_DEFAULT_KEY
+                or any(ord(char) < 32 for char in label)
+            ):
+                raise ValueError("VISUAL_RESOURCE_INVALID")
+            clean = label.strip()
+            if clean in result:
+                raise ValueError("VISUAL_RESOURCE_INVALID")
+            result[clean] = path_value(path)
         return result
+
+    def _portrait_selection(self, character_id: str) -> _PortraitSelection:
+        """解析当前角色的立绘形态，失败时抛可恢复的 PortraitUnavailableError。"""
+
+        manifest = self._manifest(character_id)
+        try:
+            selected, _resources = self._select_visual_resource(manifest)
+        except ValueError as error:
+            raise PortraitUnavailableError("角色视觉配置无效。", code="config_invalid") from error
+        if selected is None:
+            raise PortraitUnavailableError("当前角色没有可用立绘。", code="no_visual")
+        if selected["type"] != PORTRAIT_RESOURCE_TYPE:
+            raise PortraitUnavailableError(
+                "当前角色的默认视觉不是静态立绘。", code="unsupported_type"
+            )
+        prefix = "" if selected["root"] == "." else selected["root"] + "/"
+        config_relative = prefix + selected["entry"]
+        try:
+            config_path = Path(self.characters.resolve_resource(character_id, config_relative))
+        except Exception as error:  # noqa: BLE001 - 宿主异常类型不稳定
+            raise PortraitUnavailableError("立绘配置读取失败。", code="config_missing") from error
+        try:
+            raw_config = config_path.read_bytes()
+        except OSError as error:
+            raise PortraitUnavailableError("立绘配置读取失败。", code="config_missing") from error
+        try:
+            config = json.loads(raw_config.decode("utf-8-sig"))
+        except (UnicodeDecodeError, ValueError) as error:
+            raise PortraitUnavailableError("立绘配置不是合法 JSON。", code="config_invalid") from error
+        legacy = selected["root"] == "." and selected["entry"] == PORTRAIT_LEGACY_ENTRY
+        if legacy:
+            config = config.get("portrait") if isinstance(config, Mapping) else None
+        try:
+            paths = self._portrait_configuration(config, legacy=legacy)
+        except ValueError as error:
+            raise PortraitUnavailableError("立绘配置无效。", code="config_invalid") from error
+        # 图片路径相对 root（不是 entry 所在目录），root='.' 时相对角色包根。
+        full_paths = {key: prefix + value for key, value in paths.items()}
+        signature = hashlib.sha256(
+            "\x00".join(
+                [character_id, selected["id"], selected["type"], selected["root"], selected["entry"]]
+            ).encode("utf-8")
+            + b"\x00"
+            + hashlib.sha256(raw_config).digest()
+        ).hexdigest()
+        return _PortraitSelection(
+            selected["id"], selected["type"], selected["root"], selected["entry"],
+            full_paths, signature,
+        )
+
+    def _portrait_map(self, character_id: str) -> dict[str, str]:
+        return dict(self._portrait_selection(character_id).paths)
 
     def state(self) -> dict[str, Any]:
         """当前角色、立绘、语气等状态。
@@ -674,10 +952,30 @@ class RemoteService:
                 "theme": {},
                 "settings": self.ui_settings(),
                 "noCharacter": True,
+                "portraitAvailable": False,
+                "portraitIssue": "no_character",
             }
 
-        portraits = self._portrait_map(character_id)
-        manifest = self._manifest(character_id)
+        portraits: dict[str, str] = {}
+        portrait_issue = ""
+        try:
+            portraits = self._portrait_map(character_id)
+        except RemoteUnavailableError as error:
+            # 没有可用立绘不是服务故障：照常返回空立绘，让渲染可用性协调器
+            # 保持 DETACHED / 有界卡片，而不是整页误判「电脑离线」。
+            portrait_issue = str(getattr(error, "code", "") or "portrait_unavailable")
+            self.log("warning", "portrait_unavailable", {
+                "character": character_id,
+                "reason_code": portrait_issue,
+            })
+        manifest: dict[str, Any] = {}
+        try:
+            manifest = self._manifest(character_id)
+        except RemoteUnavailableError as error:
+            self.log("warning", "manifest_unavailable", {
+                "character": character_id,
+                "error_type": type(error).__name__,
+            })
         theme: dict[str, Any] = {}
         try:
             raw_theme = self.mobile.theme()
@@ -700,11 +998,13 @@ class RemoteService:
             ],
             # 没有立绘时别去 next(iter(...)) —— 空集合会抛 StopIteration
             "defaultPortraitKey": (
-                "__default__" if "__default__" in portraits
+                PORTRAIT_DEFAULT_KEY if PORTRAIT_DEFAULT_KEY in portraits
                 else (next(iter(portraits)) if portraits else "")
             ),
             "tones": tones,
             "portraitOverrides": self.portrait_overrides(),
+            "portraitAvailable": bool(portraits),
+            "portraitIssue": portrait_issue,
             "theme": theme,
             "settings": self.ui_settings(),
             "noCharacter": False,
@@ -752,26 +1052,37 @@ class RemoteService:
         return f"/asset/portrait?{query}"
 
     def portrait_bytes(self, character_id: str, key: str) -> tuple[str, bytes]:
-        portraits = self._portrait_map(character_id)
-        relative = portraits.get(key) or portraits.get("__default__")
+        selection = self._portrait_selection(character_id)
+        relative = selection.paths.get(key) or selection.paths.get(PORTRAIT_DEFAULT_KEY)
         if not relative:
             raise RemoteUnavailableError("找不到该立绘。")
-        cache_key = f"{character_id}\x00{relative}"
+        # 缓存键带上选中形态 + 配置文件指纹：换了形态或改了 resource.json
+        # 都会得到新键，第一次的错误结果不会被永久缓存。
+        cache_key = f"{character_id}\x00{selection.signature}\x00{relative}"
         with self._state_lock:
             cached = self._portrait_cache.get(cache_key)
             if cached is not None:
                 return cached
-        absolute = Path(self.characters.resolve_resource(character_id, relative))
+        try:
+            absolute = Path(self.characters.resolve_resource(character_id, relative))
+        except Exception as error:  # noqa: BLE001 - 宿主异常类型不稳定
+            raise RemoteUnavailableError("立绘路径无效。") from error
         try:
             payload = absolute.read_bytes()
         except OSError as error:
             raise RemoteUnavailableError("立绘文件读取失败。") from error
         if not payload:
             raise RemoteUnavailableError("立绘文件为空。")
-        media_type = _MIME_BY_SUFFIX.get(absolute.suffix.lower(), "application/octet-stream")
+        suffix = absolute.suffix.lower()
+        media_type = _MIME_BY_SUFFIX.get(suffix)
+        if media_type is None:
+            # 旧实现会回落到 application/octet-stream，把 resource.json 当图片发出去。
+            raise RemoteUnavailableError("不支持的立绘文件格式。")
+        if not _image_payload_matches(suffix, payload):
+            raise RemoteUnavailableError("立绘文件内容与格式不符。")
         entry = (media_type, payload)
         with self._state_lock:
-            if len(self._portrait_cache) > 64:
+            if len(self._portrait_cache) >= PORTRAIT_CACHE_ENTRIES:
                 self._portrait_cache.clear()
             self._portrait_cache[cache_key] = entry
         return entry
@@ -851,9 +1162,33 @@ class RemoteService:
         ).hexdigest()
         with self._tts_lock:
             cached = self._tts_cache.get(cache_key)
-        if cached is not None and cached.is_file():
-            return cached
+            if cached is not None and cached.is_file():
+                return cached
+            # 同 key 已有在途请求：等待它，绝不重复合成
+            waiter = self._tts_inflight.get(cache_key)
+            leader = waiter is None
+            if leader:
+                waiter = threading.Event()
+                self._tts_inflight[cache_key] = waiter
+        if not leader:
+            waiter.wait(TTS_TIMEOUT_SECONDS + 5.0)
+            with self._tts_lock:
+                cached = self._tts_cache.get(cache_key)
+            if cached is not None and cached.is_file():
+                return cached
+            # leader 失败/超时：明确报错，调用方重试时会成为新的 leader
+            raise RemoteUnavailableError("语音合成未成功，请重试。")
+        try:
+            return self._synthesize_uncached(character_id, cache_key, clean_text, tone)
+        finally:
+            with self._tts_lock:
+                # 只有仍是本次 leader 的 event 才移除（避免误清新一轮的在途项）
+                if self._tts_inflight.get(cache_key) is waiter:
+                    self._tts_inflight.pop(cache_key, None)
+            waiter.set()
 
+    def _synthesize_uncached(self, character_id: str, cache_key: str,
+                             clean_text: str, tone: str) -> Path:
         request_id = f"remote-{secrets.token_hex(12)}"
         result = self.tts.begin(
             {
@@ -1028,8 +1363,9 @@ def _build_handler(service: RemoteService, token: str) -> type[BaseHTTPRequestHa
                     self._require_token(parsed)
                     self._send_html(render_page(token, service.ui_settings()))
                     return
-                if route in {"/app.css", "/app.js", "/manifest.webmanifest"}:
-                    # 这三个由 <link>/<script>/manifest 直接请求，浏览器不会带 token；
+                if route in {"/app.css", "/app.js", "/overlay_touch_region.js",
+                             "/page_session.js", "/manifest.webmanifest"}:
+                    # 这几个由 <link>/<script>/manifest 直接请求，浏览器不会带 token；
                     # 它们本身不含任何用户数据（页面 HTML 才是需要 token 的入口）。
                     self._send_static(route)
                     return

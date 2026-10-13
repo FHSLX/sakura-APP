@@ -101,12 +101,28 @@ function say(text, kind) {
   el.msg.className = kind || '';
 }
 
+/**
+ * 规范化连接目标，返回完整 origin（带 scheme）。
+ *
+ * 保留显式 https、显式/默认端口与 IPv6；没写 scheme 时按 http 处理
+ * （局域网明文部署），没写端口时补插件默认端口 8770。
+ */
 function normalizeServer(raw) {
   let value = String(raw || '').trim();
   if (!value) return '';
-  value = value.replace(/^https?:\/\//i, '').replace(/\/+$/, '');
-  if (!/:\d+$/.test(value)) value += ':8770';
-  return value;
+  let scheme = 'http';
+  const match = value.match(/^(https?):\/\//i);
+  if (match) {
+    scheme = match[1].toLowerCase();
+    value = value.slice(match[0].length);
+  }
+  // 只保留 authority：去掉路径/查询/尾部斜杠
+  value = value.replace(/[/?#].*$/, '').replace(/\/+$/, '');
+  if (!value) return '';
+  // IPv6 形如 [::1]：结尾是 ] 就没有端口
+  const hasPort = value.endsWith(']') ? false : /:\d+$/.test(value);
+  if (!hasPort) value += ':8770';
+  return scheme + '://' + value;
 }
 
 function readStored() {
@@ -158,8 +174,23 @@ function renderRecent() {
   });
 }
 
-function targetUrl(server, token) {
-  return 'http://' + server + '/?token=' + encodeURIComponent(token);
+function targetUrl(origin, token) {
+  return origin + '/?token=' + encodeURIComponent(token);
+}
+
+/**
+ * 用户明确选择连接目标时，把完整 origin + token 同步进原生配置。
+ *
+ * 原生悬浮窗读的是 SharedPreferences，不是网页 localStorage；不同步的话，
+ * 用户在连接页换了新 IP，桌面立绘仍可能去连旧主机（真机表现为
+ * ERROR_HOST_LOOKUP = -2，但聊天页正常）。
+ */
+function syncToNative(origin, token) {
+  const bridge = window.SakuraNative;
+  if (!bridge || typeof bridge.saveServer !== 'function') return;
+  try {
+    bridge.saveServer(origin, token);
+  } catch (error) { /* 浏览器里没有原生桥接 */ }
 }
 
 /**
@@ -183,12 +214,12 @@ function goToServer(url) {
   return false;
 }
 
-async function probe(server, token, timeoutMs) {
+async function probe(origin, token, timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs || 6000);
   try {
     const response = await fetch(
-      'http://' + server + '/api/status?token=' + encodeURIComponent(token),
+      origin + '/api/status?token=' + encodeURIComponent(token),
       { signal: controller.signal, cache: 'no-store' }
     );
     if (!response.ok) {
@@ -242,6 +273,8 @@ async function enter() {
     localStorage.setItem(KEYS.server, JSON.stringify({ server: server, token: token }));
   } catch (error) { /* 存储不可用时忽略 */ }
   remember(server);
+  // 同一次连接选择：网页历史记录 + localStorage + 原生持久配置保持一致
+  syncToNative(server, token);
   say('正在进入…', 'ok');
   goToServer(targetUrl(server, token));
 }
@@ -264,17 +297,20 @@ el.token.addEventListener('keydown', (event) => {
 
 (function boot() {
   const stored = readStored();
-  if (stored.server) el.host.value = stored.server;
+  if (stored.server) el.host.value = normalizeServer(stored.server) || stored.server;
   if (stored.token) el.token.value = stored.token;
   renderRecent();
 
   // 有保存过配置就直接进主界面，省一次点击；连不上再回到这里。
   if (stored.server && stored.token) {
-    say('正在连接 ' + stored.server + ' …', '');
-    probe(stored.server, stored.token, 5000).then((result) => {
+    const origin = normalizeServer(stored.server);
+    say('正在连接 ' + origin + ' …', '');
+    probe(origin, stored.token, 5000).then((result) => {
       if (result.ok) {
-        say('正在连接 ' + stored.server + ' …', 'ok');
-        goToServer(targetUrl(stored.server, stored.token));
+        say('正在连接 ' + origin + ' …', 'ok');
+        // 自动重连也是一次真实选择：把规范化 origin 同步进原生配置
+        syncToNative(origin, stored.token);
+        goToServer(targetUrl(origin, stored.token));
       } else {
         say('上次的地址连不上了（' + result.message + '），请检查或重新填写。', 'err');
       }

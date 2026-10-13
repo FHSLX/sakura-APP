@@ -29,9 +29,21 @@ public class ConfigReceiver extends BroadcastReceiver {
             return;
         }
         if (ACTION_REFRESH_OVERLAY.equals(action) || ACTION_RESCALE_OVERLAY.equals(action)) {
+            boolean refresh = ACTION_REFRESH_OVERLAY.equals(action);
             Intent service = new Intent(context, OverlayService.class);
-            service.putExtra(OverlayService.EXTRA_REFRESH, ACTION_REFRESH_OVERLAY.equals(action));
+            service.putExtra(OverlayService.EXTRA_REFRESH, refresh);
             service.putExtra(OverlayService.EXTRA_RESCALE, ACTION_RESCALE_OVERLAY.equals(action));
+            if (refresh) {
+                // 刷新 = 连接配置变了，运行中的立绘要重载到新地址：
+                // 优先用发送方带来的地址，否则回读当前有效配置
+                String url = intent.getStringExtra(OverlayService.EXTRA_URL);
+                if (url == null || url.isEmpty()) {
+                    url = PetConfig.chatUrl(context);
+                }
+                if (!url.isEmpty()) {
+                    service.putExtra(OverlayService.EXTRA_URL, url);
+                }
+            }
             try {
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
                     context.startForegroundService(service);

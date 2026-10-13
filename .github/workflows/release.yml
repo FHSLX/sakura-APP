@@ -1,25 +1,28 @@
-name: Release
+name: Build (manual)
 
-# 打一个 v* 标签就自动构建并发布，不需要本地环境。
+# 仅手动触发：构建并上传**验证用 artifact**，不再由 tag 自动发布。
 #
-# 用法：
-#   git tag -a v1.1.0 -m "版本说明"
-#   git push origin v1.1.0
+# 为什么必须改成手动（本轮授权修复）：
+#   旧配置在 push v* tag 时自动构建并创建 GitHub Release。CI 没有签名密钥，
+#   产出的是**未签名** APK；一旦 tag 推送，它会成为 Release 资产，把用户本机
+#   同签名的 1.2.6/code2 安装包顶掉（未签名包在部分系统上根本无法覆盖安装）。
+#   发布动作因此交回有签名密钥的本地流程（tools/build_release.ps1）。
 #
-# 产物：
-#   SakuraRemote-release.apk      手机 App
-#   plugin-sakura.remote-<version>.zip  Sakura 插件
-#   MANUAL.md                      使用手册
+# 用法：Actions 页面 → Build (manual) → Run workflow。
+#
+# 产物（上传为 artifact，不发布）：
+#   SakuraRemote-release.apk                  手机 App（CI 未签名，仅验证构建）
+#   plugin-sakura.remote-<version>.zip        Sakura 插件
+#   MANUAL.md                                 使用手册
+#
+# 插件根路径：本仓库**根目录就是插件根**（plugin.yaml/http_server.py/static 在根），
+# 不再有 sakura_remote/ 这一层。
 
 on:
-  push:
-    tags:
-      - 'v*'
-  # 也可以在 Actions 页面手动触发一次，用来验证构建是否正常
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -42,22 +45,57 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
+      # 根即插件：版本从根目录 plugin.yaml 读，绝不从 sakura_remote/plugin.yaml 读。
       - name: Read version
         id: version
         run: |
-          VERSION=$(grep -E '^version:' sakura_remote/plugin.yaml | head -1 | awk '{print $2}' | tr -d '"'"'"'')
+          set -e
+          if [ ! -f plugin.yaml ]; then
+            echo "::error::仓库根缺少 plugin.yaml（根目录即插件）"
+            exit 1
+          fi
+          VERSION=$(grep -E '^version:' plugin.yaml | head -1 | awk '{print $2}' | tr -d '"'"'"'')
+          if [ -z "$VERSION" ]; then
+            echo "::error::plugin.yaml 没有解析出 version"
+            exit 1
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "插件版本: $VERSION"
 
-      # ---- 插件包：纯 Python 标准库，没有构建步骤，打包即可 ----
+      # 构建前先确认「根即插件」的目录形状成立（缺文件就直接失败，不产出半成品）。
+      - name: Verify plugin layout
+        run: |
+          set -e
+          missing=0
+          for f in plugin.yaml plugin.py http_server.py web_ui.py config.json LICENSE NOTICE; do
+            if [ ! -f "$f" ]; then echo "::error::缺少插件文件 $f"; missing=1; fi
+          done
+          for f in static/app.css static/app.js static/overlay_touch_region.js static/page_session.js static/manifest.webmanifest; do
+            if [ ! -f "$f" ]; then echo "::error::缺少静态资源 $f"; missing=1; fi
+          done
+          if [ "$missing" = "1" ]; then exit 1; fi
+          echo "插件根目录形状校验通过"
+
+      # ---- 插件包：纯 Python 标准库，没有构建步骤，按白名单打包即可 ----
+      # 白名单与 tools/build_release.ps1 保持一致：不用「整目录拷贝再删」，
+      # 避免把 phone_app/、tests/、dist/ 连同上一轮构建产物一起打进去。
       - name: Package plugin
         run: |
+          set -e
+          VERSION="${{ steps.version.outputs.version }}"
           mkdir -p out/plugin/sakura.remote
-          cp -r sakura_remote/. out/plugin/sakura.remote/
-          # 去掉不该进包的东西（和 tools/build_release.ps1 保持一致）
+          for f in plugin.yaml plugin.py http_server.py web_ui.py config.json restart_helper.ps1 LICENSE NOTICE; do
+            cp "$f" out/plugin/sakura.remote/
+          done
+          # static/ 全量：app.css / app.js / overlay_touch_region.js / page_session.js / manifest
+          cp -r static out/plugin/sakura.remote/static
           find out/plugin -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
           find out/plugin -name '*.pyc' -delete 2>/dev/null || true
-          cd out/plugin && zip -r "../plugin-sakura.remote-${{ steps.version.outputs.version }}.zip" sakura.remote
+          cd out/plugin
+          zip -r "../plugin-sakura.remote-$VERSION.zip" sakura.remote
+          cd ../..
+          # 全部 JS 资源必须真的进包（防止再出现「少同步一个 js」）
+          unzip -l "out/plugin-sakura.remote-$VERSION.zip" | grep -E 'static/(app\.js|app\.css|overlay_touch_region\.js|page_session\.js|manifest\.webmanifest)$'
 
       # ---- APK ----
       - name: Install Capacitor dependencies
@@ -73,7 +111,7 @@ jobs:
         run: |
           chmod +x gradlew
           # 没有 keystore.properties 时 build.gradle 会自动跳过签名，
-          # 产出的是未签名包（只能用于验证构建是否通过）
+          # 产出的是未签名包（只能用于验证构建是否通过，不用于发布）
           ./gradlew --no-daemon assembleRelease
 
       - name: Collect APK
@@ -118,24 +156,3 @@ jobs:
           name: sakura-remote-${{ steps.version.outputs.version }}
           path: out/*
           if-no-files-found: error
-
-      # tag 推送时才建 Release；手动触发只上传 artifact
-      - name: Create release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          name: ${{ github.ref_name }}
-          generate_release_notes: true
-          files: |
-            out/SakuraRemote-release.apk
-            out/plugin-sakura.remote-${{ steps.version.outputs.version }}.zip
-            out/MANUAL.md
-          body_path: docs/Release说明.md
-
-            | 文件 | 装在哪 |
-            | --- | --- |
-            | `SakuraRemote-release.apk` | 手机 |
-            | `plugin-sakura.remote-${{ steps.version.outputs.version }}.zip` | 电脑（Sakura 插件） |
-
-            > APK 是 CI 构建的**未签名**包，部分系统可能拒绝安装。
-            > 需要签名版请按 README 的「自己构建安装包」在本机构建。

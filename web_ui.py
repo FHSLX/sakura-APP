@@ -25,7 +25,11 @@ def _build_id() -> str:
 
     static_dir = Path(__file__).resolve().parent / "static"
     newest = 0
-    for name in ("app.css", "app.js"):
+    # overlay_touch_region.js 也必须参与：改了穿透几何却复用旧缓存，
+    # 悬浮窗会一直按旧轮廓设输入区域，极难排查。
+    # page_session.js 是页面代际的唯一来源（INT-01），同样要计入版本号，
+    # 否则旧缓存会继续用「两个模块各自随机」的旧会话逻辑。
+    for name in ("app.css", "app.js", "overlay_touch_region.js", "page_session.js"):
         try:
             newest = max(newest, int((static_dir / name).stat().st_mtime))
         except OSError:
@@ -146,11 +150,6 @@ _PAGE = """<!doctype html>
         </div>
         <div class="settingHint">正数把立绘往上移，负数往下移。</div>
 
-        <label class="switchRow" for="floatToggle">
-          <input id="floatToggle" type="checkbox">
-          <span>立绘上下浮动</span>
-        </label>
-
         <div class="fieldLabel"><span>字体大小</span><span id="fontValue">100%</span></div>
         <div class="scaleRow">
           <input id="fontRange" type="range" min="70" max="180" step="5" value="100">
@@ -233,17 +232,28 @@ _PAGE = """<!doctype html>
         <button id="chatButton" class="ghostButton" type="button">收起 App，回桌面看立绘</button>
         <button id="miniConfigButton" class="ghostButton" type="button">缩小成圆形小球</button>
         <button id="batteryButton" class="ghostButton" type="button">申请后台保活</button>
+        <label class="switchRow" for="passThroughToggle">
+          <input id="passThroughToggle" type="checkbox">
+          <span>透明处点击穿透（Android 13+）</span>
+        </label>
+        <div class="settingHint" id="passThroughHint">
+          开启后，立绘 PNG 的透明位置会直接把轻点交给下层桌面或应用，
+          人物本体与输入框照常可点。需要 Android 13 及以上；旧系统只提示不支持，
+          不会用整窗穿透冒充。
+        </div>
         <div class="settingHint" id="petHint"></div>
       </div>
 
-      <!-- 截屏授权：单独做一个按钮，让用户可以先把系统权限授好，
-           之后真正截图时就不会被系统弹窗打断。 -->
+      <!-- 截屏授权：单独做一个按钮。
+           注意：Android 不允许复用 MediaProjection 授权（Android 14 起同一个
+           授权 Intent 只能换一次投影），所以这里如实说明「每次截图都会重新
+           弹系统确认框」，不再宣称「授过一次就免弹」。 -->
       <div class="configCard">
         <div class="cardTitle">截屏</div>
-        <button id="screenPermButton" class="ghostButton" type="button">授权截屏权限</button>
+        <button id="screenPermButton" class="ghostButton" type="button">截屏测试</button>
         <div class="settingHint" id="screenPermHint">
-          点一次会弹出系统的「开始录制或投放」确认框，选择「立即开始」即可。
-          授权在本次开机内有效，之后「截取屏幕」就不会再弹窗。
+          点一次会弹出系统的「开始录制或投放」确认框，选择「立即开始」。
+          出于系统限制，每次真正截图都会重新确认一次；授权不会被长期保存或复用。
         </div>
       </div>
 
@@ -351,10 +361,15 @@ _PAGE = """<!doctype html>
       <button id="mediaToggle" class="mediaButton" type="button"
               aria-haspopup="true" aria-expanded="false" title="发送图片或截屏">＋</button>
       <div id="mediaPanel" class="mediaPanel hidden">
+        <label class="mediaItem" for="camera">拍照</label>
         <label class="mediaItem" for="image">选择图片</label>
         <button id="screenshotButton" class="mediaItem" type="button">截取屏幕</button>
       </div>
     </div>
+    <!-- 拍照必须与图库分开：只有带 capture="environment" 的独立 input 才会让
+         WebView 上报 isCaptureEnabled()，原生据此走系统相机而不是图库。
+         照片同样先进本地预览，用户点「发送」才上传。 -->
+    <input id="camera" type="file" accept="image/*" capture="environment" class="hidden">
     <input id="image" type="file" accept="image/*" class="hidden">
     <textarea id="text" rows="1" placeholder="说点什么…" autocomplete="off"></textarea>
     <button id="miniButton" type="button" aria-label="缩小为小球" title="缩小为小球">⊙</button>
@@ -370,6 +385,10 @@ _PAGE = """<!doctype html>
 </footer>
 
 <script>window.__SAKURA__ = __BOOTSTRAP__;</script>
+<!-- 页面代际会话必须在 app.js 与穿透模块之前建立：两者共用同一个编号，
+     整个文档只向原生登记一次（详见 static/page_session.js 与 INT-01）。 -->
+<script src="/page_session.js?v=__BUILD__"></script>
+<script src="/overlay_touch_region.js?v=__BUILD__"></script>
 <script src="/app.js?v=__BUILD__"></script>
 </body>
 </html>

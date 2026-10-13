@@ -36,8 +36,13 @@ public class RemoteBridge {
         /** 网页保存地址后同步给原生，悬浮窗才知道连哪儿。 */
         void saveServer(String server, String token);
 
-        /** 远程页回报自己的地址，原生侧未配置时作为兜底。 */
-        void rememberRemoteUrl(String url);
+        /**
+         * 远程页回报自己的地址，原生侧用成功上报修复陈旧配置。
+         *
+         * @param overlayPage true = 来自桌面立绘/小球页面；该页面的上报不得把
+         *                    主 App 的新配置写回旧地址
+         */
+        void rememberRemoteUrl(String url, boolean overlayPage);
 
         /**
          * 进入「桌面立绘模式」：开启悬浮窗并收起 App，
@@ -88,24 +93,121 @@ public class RemoteBridge {
         void setWindowSizePx(float width, float height);
 
         /** 请求一次手机截屏；结果通过 onScreenCapture 异步回传。 */
-        void requestScreenshot();
+        void requestScreenshot(String pageSessionId);
 
         /** 只申请截屏授权（不截取），供设置页的「授权截屏权限」按钮使用。 */
-        void requestScreenPermission();
+        void requestScreenPermission(String pageSessionId);
 
         boolean hasScreenPermission();
 
         /** 把截图结果交给网页（由宿主回调）。 */
         void deliverScreenshot(String dataUrl, String error);
 
+        // ---- 页面会话登记（RV-02）----
+
+        /** 页面 boot / 导航完成时登记本次加载的真实会话 id。 */
+        void registerPageSession(String pageSessionId);
+
+        /** 页面 pagehide / 导航开始时注销会话，让旧结果立即失效。 */
+        void invalidatePageSession(String pageSessionId);
+
         /** 悬浮窗权限、运行状态、电池白名单，一次读全，供设置页渲染。 */
         String petStatus();
+
+        // ---- 显示 / 穿透偏好（App 与浮窗共用一份持久状态）----
+
+        /**
+         * 去敏偏好快照（JSON）：{float:{has,value}, passThrough:{has,value,supported}}。
+         *
+         * <p>默认实现返回「无能力、无偏好」，保证旧宿主/测试替身不必改动。
+         */
+        default String displayPreferences() {
+            return "{\"supported\":false}";
+        }
+
+        /**
+         * 写入显示 / 穿透偏好，返回可校验回执（{"ok":true,...} 或 {"ok":false,"error":"..."}）。
+         *
+         * <p>App 侧只持久化意图并经安全通道同步运行中的浮窗；**不提交区域裁剪**。
+         */
+        default String setDisplayPreferences(String json) {
+            return "{\"ok\":false,\"error\":\"unsupported\"}";
+        }
+
+        // ---- 精确局部穿透（API33+ AttachedSurfaceControl）----
+
+        /**
+         * 提交一次输入区域快照（JSON，见 OverlayTouchRegionController）。
+         * 返回稳定结果码：
+         *   queued / stale / not-registered / disabled / unsupported / invalid。
+         * queued 只表示已受理；真正 applied 由 touchRegionStatus() 的 revision ACK。
+         */
+        String setTouchRegion(String json);
+
+        /** 关闭精确穿透：把窗口输入区域恢复成整窗。 */
+        void clearTouchRegion();
+
+        /** 本机是否具备公开的精确穿透 API（API33+）。 */
+        boolean isTouchRegionSupported();
+
+        /** 启用/停用精确穿透模式（会同时处理 Android12+ 窗口 alpha 安全阈值）。 */
+        void setPassThroughEnabled(boolean enabled);
+
+        /** 精确穿透的当前状态（JSON），供界面显示。 */
+        String touchRegionStatus();
+
+        // ---- 渲染可用性信号（FIX-BLANK-01 / FIX-RUNTIME-01）----
+        //
+        // 注意：网页上报的 bootOk / bootFailed / portraitVisible / pageSession
+        // **不在这里**。它们是桥线程回调，必须经 {@link RenderSignalRouter}
+        // 封送到主线程后落到 {@link RenderSignalSink}，绝不能同步直调宿主去改
+        // View/WindowManager。见 notifyOverlay* 方法与 setRenderSignalSink()。
+
+        /** 去敏渲染诊断快照（JSON）：稳定代码/计数，不含 URL/token/聊天/图片内容。 */
+        String renderDiagnostics();
+    }
+
+    /** 诊断快照提供者；由宿主注入（OverlayService），避免 Bridge 反向依赖。 */
+    public interface DiagnosticsProvider {
+        String snapshot();
     }
 
     private final Host host;
+    private DiagnosticsProvider diagnosticsProvider;
+    /**
+     * 渲染信号的**主线程路由器**（FIX-RUNTIME-01）。
+     *
+     * 这些方法由网页通过 {@code @JavascriptInterface} 调用，运行在 WebView
+     * 桥线程。桥线程绝不能直接改 View/WindowManager —— 旧实现同步直调到
+     * OverlayService 才导致真机「信号都到了、窗口不挂」。所有渲染信号统一
+     * 经过本路由器封送到主线程后，才落到 {@link RenderSignalSink}。
+     */
+    private RenderSignalRouter renderRouter;
 
     public RemoteBridge(Host host) {
         this.host = host;
+    }
+
+    public void setRenderDiagnosticsProvider(DiagnosticsProvider provider) {
+        this.diagnosticsProvider = provider;
+    }
+
+    /**
+     * 注入主线程落点并建立路由器；由宿主（OverlayService）在创建悬浮窗时调用。
+     *
+     * @param sink 只允许在主线程执行的落点；为 null 时信号只记诊断不落地
+     */
+    public void setRenderSignalSink(RenderSignalSink sink) {
+        this.renderRouter = new RenderSignalRouter(sink);
+    }
+
+    /** 供行为测试注入替身 Poster（可区分「入队」与「主线程执行」）。 */
+    void setRenderSignalRouterForTest(RenderSignalRouter router) {
+        this.renderRouter = router;
+    }
+
+    public RenderSignalRouter renderRouter() {
+        return renderRouter;
     }
 
     /** 由本地页调用；名字与 MainActivity 里的 addJavascriptInterface 一致。 */
@@ -163,22 +265,50 @@ public class RemoteBridge {
     }
 
     /**
-     * 网页进入远程页后回报自己的地址，作为原生侧配置的兜底。
+     * 主 App 的远程页进入后回报自己的地址：用成功上报修复陈旧配置。
      *
      * 为什么需要：连接设置页跑在 https://localhost，远程页跑在
      * http://电脑IP:8770 —— 两者是不同源，localStorage 不互通。
-     * 如果只依赖 localStorage，用户在远程页点「开启桌面立绘」时原生侧读不到地址，
-     * 会误报「需要连接电脑」。
+     * 用户在连接页换了新 IP 后，原生侧可能还留着连不上的旧主机
+     *（真机表现为 ERROR_HOST_LOOKUP = -2），这里用实际加载成功的地址覆盖它。
      */
     @JavascriptInterface
     public void rememberUrl(String url) {
-        host.rememberRemoteUrl(url);
+        host.rememberRemoteUrl(url, false);
+    }
+
+    /**
+     * 桌面立绘 / 小球页面回报自己的地址。
+     *
+     * <p>旧立绘页面的地址永远不能覆盖主 App 的新配置，所以单独走一条入口，
+     * 由宿主按「立绘页面」规则处理（已配置时忽略）。
+     */
+    @JavascriptInterface
+    public void rememberOverlayUrl(String url) {
+        host.rememberRemoteUrl(url, true);
     }
 
     /** 返回 JSON 字符串；网页解析后决定按钮状态。 */
     @JavascriptInterface
     public String petStatus() {
         return host.petStatus();
+    }
+
+    /**
+     * 偏好快照：App / 悬浮窗 / 小球读同一份持久状态，不依赖两个 WebView 的 localStorage。
+     */
+    @JavascriptInterface
+    public String displayPreferences() {
+        return host.displayPreferences();
+    }
+
+    /**
+     * 写入偏好。App 页面只持久化意图 + 通过安全通道同步运行中浮窗；
+     * 真正的区域裁剪仍只由悬浮窗页面的 SakuraTouchRegion 提交。
+     */
+    @JavascriptInterface
+    public String setDisplayPreferences(String json) {
+        return host.setDisplayPreferences(json == null ? "" : json);
     }
 
     /**
@@ -271,23 +401,163 @@ public class RemoteBridge {
     /**
      * 请求一次手机截屏。
      *
-     * 首次会弹系统授权框；结果通过 {@link #onScreenCapture(String, String)} 异步回传，
-     * 调用方（网页）要先定义 `window.SakuraNative.onScreenCapture`。
+     * 首次会弹系统授权框；结果通过 {@link #onScreenCapture(String, String)}
+     * 异步回传，调用方（网页）要先定义 `window.SakuraNative.onScreenCapture`。
      */
     @JavascriptInterface
     public void requestScreenshot() {
-        host.requestScreenshot();
+        host.requestScreenshot("");
+    }
+
+    /**
+     * 带页面会话 id 的截图请求（推荐）。
+     *
+     * pageSessionId 由网页在每次加载时生成；结果只会送回**发起请求且会话仍匹配**
+     * 的页面。WebView reload 之后旧会话的迟到结果会被丢弃，不会出现在新页面上。
+     */
+    @JavascriptInterface
+    public void requestScreenshotWithSession(String pageSessionId) {
+        host.requestScreenshot(pageSessionId == null ? "" : pageSessionId);
     }
 
     /** 只申请截屏授权，不截取。设置页的「授权截屏权限」按钮用。 */
     @JavascriptInterface
     public void requestScreenPermission() {
-        host.requestScreenPermission();
+        host.requestScreenPermission("");
+    }
+
+    @JavascriptInterface
+    public void requestScreenPermissionWithSession(String pageSessionId) {
+        host.requestScreenPermission(pageSessionId == null ? "" : pageSessionId);
     }
 
     @JavascriptInterface
     public boolean hasScreenPermission() {
         return host.hasScreenPermission();
+    }
+
+    // ---- 页面会话登记（RV-02）----
+
+    /**
+     * 登记本次页面加载的会话 id。
+     *
+     * 原生不再拿随机会话 id 和 URL 比较，而是按 (宿主 → 会话) 登记：
+     * 新页登记即替换旧会话，同 URL reload 也会换新 id，旧结果自然失效。
+     */
+    @JavascriptInterface
+    public void registerPageSession(String pageSessionId) {
+        host.registerPageSession(pageSessionId == null ? "" : pageSessionId);
+    }
+
+    /** 页面卸载/导航开始时注销会话。 */
+    @JavascriptInterface
+    public void invalidatePageSession(String pageSessionId) {
+        host.invalidatePageSession(pageSessionId == null ? "" : pageSessionId);
+    }
+
+    /**
+     * 渲染信号路由器；未注入落点时用一个空路由器，保证桥方法永不抛异常回网页。
+     *
+     * 「永不抛异常」是刻意的：网页侧 notifyRenderSession 捕获异常后静默返回 false，
+     * 一旦这里抛出，现场失败会被完全掩盖（这正是旧实现在真机上难查的原因）。
+     */
+    private RenderSignalRouter route() {
+        RenderSignalRouter router = renderRouter;
+        if (router == null) {
+            router = new RenderSignalRouter(null);
+            renderRouter = router;
+        }
+        return router;
+    }
+
+    // ---- 精确局部穿透 ----
+
+    /**
+     * 提交输入区域快照。
+     *
+     * 载荷里的矩形是 **WebView 内容坐标系（CSS 像素）**，不是屏幕坐标：
+     * 原生按 inputView 实际像素 / 报告的 CSS 视口尺寸校准，并只加 WebView
+     * 相对窗口的偏移。窗口拖动时本地轮廓不变，所以这里不需要也不应该
+     * 叠加窗口 x/y。
+     */
+    @JavascriptInterface
+    public String setTouchRegion(String json) {
+        return host.setTouchRegion(json);
+    }
+
+    /** 关闭精确穿透，恢复整窗可交互（用户永远能拿回控制）。 */
+    @JavascriptInterface
+    public void clearTouchRegion() {
+        host.clearTouchRegion();
+    }
+
+    @JavascriptInterface
+    public boolean isTouchRegionSupported() {
+        return host.isTouchRegionSupported();
+    }
+
+    @JavascriptInterface
+    public void setPassThroughEnabled(boolean enabled) {
+        host.setPassThroughEnabled(enabled);
+    }
+
+    @JavascriptInterface
+    public String touchRegionStatus() {
+        return host.touchRegionStatus();
+    }
+
+    // ---- 渲染可用性信号（FIX-BLANK-01 / FIX-RUNTIME-01）----
+
+    /**
+     * 网页 boot 开始/导航开始：通知原生推进渲染代际。
+     *
+     * 必须在页面级引导最前面调用（与 registerPageSession 同处），
+     * 让原生立刻知道「旧页面内容已不可信」。
+     *
+     * 桥线程 → 主线程：这里只入队，真正的代际推进与窗口裁决由路由器在主线程执行。
+     */
+    @JavascriptInterface
+    public void notifyOverlayPageSession(String pageSessionId) {
+        route().pageSession(pageSessionId);
+    }
+
+    /** 网页 boot 完成：DOM/桥就绪，但立绘可能还在解码。 */
+    @JavascriptInterface
+    public void notifyOverlayBootOk(String pageSessionId) {
+        route().bootOk(pageSessionId);
+    }
+
+    /** 网页 boot 失败（初始化异常/拿不到状态）；只传会话 id，不传错误原文。 */
+    @JavascriptInterface
+    public void notifyOverlayBootFailed(String pageSessionId) {
+        route().bootFailed(pageSessionId);
+    }
+
+    /**
+     * 确认有可见且已解码的立绘：原生据此才允许挂完整透明窗口。
+     *
+     * 无参数、无图片数据：只表达「现在有可见内容」这一事实。
+     */
+    @JavascriptInterface
+    public void notifyOverlayPortraitVisible(String pageSessionId) {
+        route().portraitVisible(pageSessionId);
+    }
+
+    /** 页面卸载/导航开始（pagehide）：注销会话，让在途结果立刻失效。 */
+    @JavascriptInterface
+    public void notifyOverlayPageHidden(String pageSessionId) {
+        route().invalidatePageSession(pageSessionId);
+    }
+
+    /**
+     * 去敏渲染诊断快照（JSON）。
+     *
+     * 只含稳定代码与计数，供排障读取；不返回 URL、token、聊天或图片内容。
+     */
+    @JavascriptInterface
+    public String overlayRenderDiagnostics() {
+        DiagnosticsProvider provider = diagnosticsProvider;
+        return provider == null ? "{}" : provider.snapshot();
     }
 
     /**

@@ -46,6 +46,48 @@
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
 
+        <!-- 截屏授权入口：独立、无界面的 Activity。
+             只负责「隐藏悬浮窗 → 申请系统授权 → 把 grant 交给协调器 → 让位」，
+             避免把授权结果固定绑到 MainActivity 的 WebView，也避免自己
+             出现在最终截图画面里。
+
+             RV-01：不能设 android:noHistory="true" —— 官方文档明确说明，
+             noHistory 的 Activity 在发起另一个 Activity 请求结果时收不到
+             onActivityResult，截图授权会永远拿不到结果。
+             用 singleTop 而不是 singleTask：既避免重复实例，又不引入
+             startActivityForResult 结果投递的任务/启动模式边界问题。 -->
+        <activity
+            android:name=".CapturePermissionActivity"
+            android:exported="false"
+            android:taskAffinity="${applicationId}.capture"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTop"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <!-- 悬浮窗「选择图片」用的辅助 Activity：不导出、无自己的界面。
+             不能用 noHistory（会收不到 onActivityResult，和授权页同一个坑）；
+             用 configChanges 顶住旋转，避免重建时重复弹选择器。 -->
+        <activity
+            android:name=".FileChooserActivity"
+            android:exported="false"
+            android:taskAffinity="${applicationId}.picker"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <service
+            android:name=".PortraitOverlayAccess"
+            android:label="@string/portrait_overlay_access_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data android:name="android.accessibilityservice"
+                android:resource="@xml/portrait_overlay_access" />
+        </service>
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -56,6 +98,16 @@
                 android:resource="@xml/file_paths"></meta-data>
         </provider>
     </application>
+
+    <!-- Android 11+ 包可见性：只声明需要查询「拍照」这一条 intent，
+         绝不用 QUERY_ALL_PACKAGES 扩大范围。
+         App 与悬浮窗都先用 resolveActivity(ACTION_IMAGE_CAPTURE) 预检；
+         没有这条声明时查询结果恒为 null，会被误判成「没有相机」而无法直接拍照。 -->
+    <queries>
+        <intent>
+            <action android:name="android.media.action.IMAGE_CAPTURE" />
+        </intent>
+    </queries>
 
     <!-- Permissions -->
 

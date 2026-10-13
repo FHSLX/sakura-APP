@@ -34,6 +34,24 @@ public final class PetConfig {
     /** 悬浮窗高度（相对宽度的比例）。 */
     public static final String KEY_WINDOW_HEIGHT = "window_height_ratio";
 
+    /**
+     * 「透明处点击穿透」的用户意图（App / 悬浮窗 / 小球共用同一份）。
+     *
+     * <p>用一对 key 表达三态：SET 未置位 = 没有偏好（由调用方取默认），
+     * SET 置位 = 用户明确选过，VALUE 是选择。这样「默认」与「用户选过默认值」
+     * 不会混在一起，重启/换页面都保持。
+     */
+    public static final String KEY_PASS_THROUGH = "pass_through";
+    public static final String KEY_PASS_THROUGH_SET = "pass_through_set";
+    /** 立绘上下浮动（呼吸动画）的用户意图。 */
+    public static final String KEY_PORTRAIT_FLOAT = "portrait_float";
+    public static final String KEY_PORTRAIT_FLOAT_SET = "portrait_float_set";
+
+    /** 没有偏好时穿透默认开启（API33+ 的桌面立绘历史行为）。 */
+    public static final boolean DEFAULT_PASS_THROUGH = true;
+    /** 没有偏好时上下浮动默认关闭。 */
+    public static final boolean DEFAULT_PORTRAIT_FLOAT = false;
+
     public static final float MIN_WINDOW_WIDTH_RATIO = 0.45f;
     public static final float MAX_WINDOW_WIDTH_RATIO = 0.98f;
     public static final float DEFAULT_WINDOW_WIDTH_RATIO = 0.82f;
@@ -61,46 +79,28 @@ public final class PetConfig {
         return prefs(context).getString(KEY_TOKEN, "");
     }
 
-    /** 只接受 http/https 的 host:port，其余一律当作未配置。 */
-    public static String baseUrl(Context context) {
-        String server = server(context);
-        if (server == null || server.isEmpty()) {
-            return "";
-        }
-        String value = server.trim();
-        if (value.startsWith("http://") || value.startsWith("https://")) {
-            return trimTrailingSlash(value);
-        }
-        return "http://" + trimTrailingSlash(value);
+    /**
+     * 当前持久配置规范化后的连接目标；未配置/无效时返回空 profile。
+     *
+     * <p>历史数据里 server 可能是「host:port」（没有 scheme），也可能是完整 origin，
+     * 统一交给 {@link ConnectionProfile} 归一，避免出现「两份地址」。
+     */
+    public static ConnectionProfile currentProfile(Context context) {
+        return ConnectionProfile.fromUserInput(server(context), token(context));
     }
 
-    private static String trimTrailingSlash(String value) {
-        int end = value.length();
-        while (end > 0 && value.charAt(end - 1) == '/') {
-            end--;
-        }
-        return value.substring(0, end);
+    /** 规范化 origin（如 http://192.168.1.5:8770）；未配置或无效时返回空串。 */
+    public static String baseUrl(Context context) {
+        return currentProfile(context).origin;
     }
 
     public static boolean isConfigured(Context context) {
-        return !baseUrl(context).isEmpty() && !token(context).isEmpty();
+        return currentProfile(context).isConfigured();
     }
 
     /** 聊天页地址；未配置时返回空串。 */
     public static String chatUrl(Context context) {
-        String base = baseUrl(context);
-        String token = token(context);
-        if (base.isEmpty()) {
-            return "";
-        }
-        if (token.isEmpty()) {
-            return base + "/";
-        }
-        try {
-            return base + "/?token=" + java.net.URLEncoder.encode(token, "UTF-8");
-        } catch (Exception error) {
-            return base + "/";
-        }
+        return currentProfile(context).chatUrl();
     }
 
     public static float scale(Context context) {
@@ -146,6 +146,109 @@ public final class PetConfig {
         prefs(context).edit().putBoolean(KEY_OVERLAY_ENABLED, enabled).apply();
     }
 
+    // ---- 用户意图偏好（App / 浮窗 / 小球共用）----------------------
+
+    /** 用户是否明确选过「透明处穿透」。 */
+    public static boolean hasPassThroughPreference(Context context) {
+        return prefs(context).getBoolean(KEY_PASS_THROUGH_SET, false);
+    }
+
+    /** 是否开启穿透；没有用户偏好时取 {@link #DEFAULT_PASS_THROUGH}。 */
+    public static boolean passThroughEnabled(Context context) {
+        return prefs(context).getBoolean(KEY_PASS_THROUGH, DEFAULT_PASS_THROUGH);
+    }
+
+    public static void setPassThroughEnabled(Context context, boolean enabled) {
+        prefs(context).edit()
+                .putBoolean(KEY_PASS_THROUGH, enabled)
+                .putBoolean(KEY_PASS_THROUGH_SET, true)
+                .apply();
+    }
+
+    /** 用户是否明确选过「立绘上下浮动」。 */
+    public static boolean hasPortraitFloatPreference(Context context) {
+        return prefs(context).getBoolean(KEY_PORTRAIT_FLOAT_SET, false);
+    }
+
+    /** 是否上下浮动；没有用户偏好时**默认关闭**。 */
+    public static boolean portraitFloatEnabled(Context context) {
+        return prefs(context).getBoolean(KEY_PORTRAIT_FLOAT, DEFAULT_PORTRAIT_FLOAT);
+    }
+
+    public static void setPortraitFloatEnabled(Context context, boolean enabled) {
+        prefs(context).edit()
+                .putBoolean(KEY_PORTRAIT_FLOAT, enabled)
+                .putBoolean(KEY_PORTRAIT_FLOAT_SET, true)
+                .apply();
+    }
+
+    /**
+     * 应用网页/App 提交的偏好 JSON；只处理出现的 key。
+     *
+     * <p><b>可确认的写入</b>：用 {@link SharedPreferences.Editor#commit()} 而不是
+     * {@code apply()}。{@code apply()} 只保证内存即刻更新（随后 get 读到的也是内存值），
+     * 无法证明磁盘写入成功；这里以 {@code commit()} 的返回值为准。
+     * 提交失败时**还原旧偏好**并返回稳定错误码 {@code commit-failed}，
+     * 绝不留下半写状态、也不覆盖用户原有选择。
+     */
+    public static String applyDisplayPreferences(Context context, String json) {
+        Boolean wantFloat = DisplayPreferences.bool(json, DisplayPreferences.KEY_FLOAT);
+        Boolean wantPass = DisplayPreferences.bool(json, DisplayPreferences.KEY_PASS_THROUGH);
+        if (wantFloat == null && wantPass == null) {
+            return DisplayPreferences.failure("invalid");
+        }
+        // 先记下旧值：commit 失败时要原样还原
+        boolean oldFloatHas = hasPortraitFloatPreference(context);
+        boolean oldFloat = portraitFloatEnabled(context);
+        boolean oldPassHas = hasPassThroughPreference(context);
+        boolean oldPass = passThroughEnabled(context);
+
+        SharedPreferences.Editor editor = prefs(context).edit();
+        if (wantFloat != null) {
+            editor.putBoolean(KEY_PORTRAIT_FLOAT, wantFloat)
+                    .putBoolean(KEY_PORTRAIT_FLOAT_SET, true);
+        }
+        if (wantPass != null) {
+            editor.putBoolean(KEY_PASS_THROUGH, wantPass)
+                    .putBoolean(KEY_PASS_THROUGH_SET, true);
+        }
+        boolean committed = editor.commit();
+        if (!committed) {
+            restoreDisplayPreferences(context, oldFloatHas, oldFloat, oldPassHas, oldPass);
+            return DisplayPreferences.failure("commit-failed");
+        }
+        return DisplayPreferences.applied(
+                hasPortraitFloatPreference(context), portraitFloatEnabled(context),
+                hasPassThroughPreference(context), passThroughEnabled(context));
+    }
+
+    /** commit 失败后把偏好还原到写入前的状态（best effort，同样走 commit）。 */
+    private static void restoreDisplayPreferences(Context context, boolean floatHas, boolean floatValue,
+                                                  boolean passHas, boolean passValue) {
+        SharedPreferences.Editor editor = prefs(context).edit();
+        if (floatHas) {
+            editor.putBoolean(KEY_PORTRAIT_FLOAT, floatValue)
+                    .putBoolean(KEY_PORTRAIT_FLOAT_SET, true);
+        } else {
+            editor.remove(KEY_PORTRAIT_FLOAT).remove(KEY_PORTRAIT_FLOAT_SET);
+        }
+        if (passHas) {
+            editor.putBoolean(KEY_PASS_THROUGH, passValue)
+                    .putBoolean(KEY_PASS_THROUGH_SET, true);
+        } else {
+            editor.remove(KEY_PASS_THROUGH).remove(KEY_PASS_THROUGH_SET);
+        }
+        editor.commit();
+    }
+
+    /** 偏好快照 JSON，供网页渲染开关。 */
+    public static String displayPreferences(Context context, boolean passThroughSupported) {
+        return DisplayPreferences.snapshot(
+                hasPortraitFloatPreference(context), portraitFloatEnabled(context),
+                hasPassThroughPreference(context), passThroughEnabled(context),
+                passThroughSupported);
+    }
+
     /** 悬浮窗宽度占屏幕的比例（用户可拖动右下角调整）。 */
     public static float windowWidthRatio(Context context) {
         float value = prefs(context).getFloat(KEY_WINDOW_WIDTH, DEFAULT_WINDOW_WIDTH_RATIO);
@@ -185,79 +288,131 @@ public final class PetConfig {
      */
     public static final String KEY_WANT_W = "want_window_w";
     public static final String KEY_WANT_H = "want_window_h";
+    /** 尺寸契约版本：旧版本可能存了越界值，需要显式迁移而不是让用户清数据。 */
+    public static final String KEY_WANT_VERSION = "want_window_v";
+    public static final int WANT_WINDOW_VERSION = 2;
+    /** 网页报来的 CSS 像素尺寸的合法范围。 */
+    public static final int WANT_MIN_PX = 160;
+    public static final int WANT_MAX_PX = 4096;
 
     public static int wantWindowWidth(Context context) {
-        return prefs(context).getInt(KEY_WANT_W, 0);
+        migrateWantWindowSize(context);
+        return clampWant(prefs(context).getInt(KEY_WANT_W, 0));
     }
 
     public static int wantWindowHeight(Context context) {
-        return prefs(context).getInt(KEY_WANT_H, 0);
+        migrateWantWindowSize(context);
+        return clampWant(prefs(context).getInt(KEY_WANT_H, 0));
     }
 
     public static void setWantWindowSize(Context context, int widthPx, int heightPx) {
         prefs(context).edit()
-                .putInt(KEY_WANT_W, Math.max(120, widthPx))
-                .putInt(KEY_WANT_H, Math.max(120, heightPx))
+                .putInt(KEY_WANT_W, clampWant(widthPx))
+                .putInt(KEY_WANT_H, clampWant(heightPx))
+                .putInt(KEY_WANT_VERSION, WANT_WINDOW_VERSION)
                 .apply();
     }
 
-    /** 网页保存服务器配置时同步进来，悬浮窗才知道该连哪儿。 */
-    public static void saveServer(Context context, String server, String token) {
-        prefs(context).edit()
-                .putString(KEY_SERVER, server == null ? "" : server.trim())
-                .putString(KEY_TOKEN, token == null ? "" : token.trim())
+    /** 0 表示「还没有有效值」；其余一律夹到 [WANT_MIN_PX, WANT_MAX_PX]。 */
+    private static int clampWant(int value) {
+        if (value <= 0) {
+            return 0;
+        }
+        return Math.min(WANT_MAX_PX, Math.max(WANT_MIN_PX, value));
+    }
+
+    /**
+     * 显式版本迁移。
+     *
+     * 旧实现把网页算出来的窗口尺寸原样落盘。一旦网页侧出现过计算循环
+     *（窗口越大→视口越旧→算出更大的窗口），就会把越界尺寸写进配置，
+     * 之后每次开桌宠都按这个坏值建窗口。这里夹到合法范围并记版本，
+     * 而不是要求用户清除 App 数据。
+     */
+    private static void migrateWantWindowSize(Context context) {
+        SharedPreferences prefs = prefs(context);
+        int version = prefs.getInt(KEY_WANT_VERSION, 1);
+        if (version >= WANT_WINDOW_VERSION) {
+            return;
+        }
+        prefs.edit()
+                .putInt(KEY_WANT_W, clampWant(prefs.getInt(KEY_WANT_W, 0)))
+                .putInt(KEY_WANT_H, clampWant(prefs.getInt(KEY_WANT_H, 0)))
+                .putInt(KEY_WANT_VERSION, WANT_WINDOW_VERSION)
                 .apply();
     }
 
     /**
-     * 从远程页地址里反推配置，作为兜底。
+     * 用户明确选择连接目标：完整 origin + token **原子**写入。
      *
-     * 连接设置页和远程页是不同源（https://localhost vs http://IP:port），
-     * localStorage 不互通；用户在远程页操作时原生侧可能还是空的。
-     * 只有「完全没配过」时才写入，避免覆盖用户在设置页认真填的地址。
+     * <p>返回 true 表示配置确实变了；调用方据此决定要不要重载运行中的立绘。
+     * 无效输入（空主机、非 HTTP(S)、空 token）不写入，保留上一份可用配置。
      */
+    public static boolean applySelection(Context context, String server, String token) {
+        return writeIfChanged(context, ConnectionProfile.fromUserInput(server, token));
+    }
+
+    /** 兼容旧调用点：等价于用户在连接设置页的选择。 */
+    public static void saveServer(Context context, String server, String token) {
+        applySelection(context, server, token);
+    }
+
+    /**
+     * 远程页成功加载后回报自己的地址，修复陈旧的 server。
+     *
+     * <p>排除本地 Capacitor 页面、空 token、非 HTTP(S)、无效主机。
+     *
+     * @param overlayPage true = 上报来自桌面立绘/小球页面（旧页面），
+     *                    此时绝不覆盖主 App 已经配好的地址，
+     *                    否则旧立绘会把主 App 的新配置写回旧地址。
+     * @return true 表示配置确实变了
+     */
+    public static boolean applyPageReport(Context context, String url, boolean overlayPage) {
+        ConnectionProfile reported = ConnectionProfile.fromRemoteUrl(url);
+        if (!reported.hasOrigin() || !reported.hasToken()) {
+            return false;
+        }
+        if (overlayPage && currentProfile(context).isConfigured()) {
+            return false;
+        }
+        return writeIfChanged(context, reported);
+    }
+
+    /** 兼容旧调用点：等价于主 App 远程页面的成功上报。 */
     public static void rememberFromUrl(Context context, String url) {
-        if (url == null || url.isEmpty()) {
-            return;
+        applyPageReport(context, url, false);
+    }
+
+    /**
+     * 立绘 / 小球页面发起的地址写入。
+     *
+     * <p>只在原生完全没配置时兜底填充；主 App 已配好时一律忽略，
+     * 杜绝「旧立绘把主 App 新配置写回旧地址」。
+     */
+    public static boolean applyOverlaySelection(Context context, String server, String token) {
+        if (currentProfile(context).isConfigured()) {
+            return false;
         }
-        String value = url.trim();
-        if (!value.startsWith("http://") && !value.startsWith("https://")) {
-            return;
+        return writeIfChanged(context, ConnectionProfile.fromUserInput(server, token));
+    }
+
+    /**
+     * 原子写入 origin + token。
+     *
+     * <p>一次 editor 里同时落两个值，避免出现「新 host 配旧 token」的中间态；
+     * 配置与现有值相同则完全不写，也不触发任何重载。
+     */
+    private static boolean writeIfChanged(Context context, ConnectionProfile target) {
+        if (target == null || !target.isConfigured()) {
+            return false;
         }
-        try {
-            java.net.URL parsed = new java.net.URL(value);
-            String host = parsed.getHost();
-            int port = parsed.getPort();
-            if (host == null || host.isEmpty() || port <= 0) {
-                return;
-            }
-            String server = host + ":" + port;
-            String token = "";
-            String query = parsed.getQuery();
-            if (query != null) {
-                for (String pair : query.split("&")) {
-                    int equal = pair.indexOf('=');
-                    if (equal > 0 && "token".equals(pair.substring(0, equal))) {
-                        token = java.net.URLDecoder.decode(pair.substring(equal + 1), "UTF-8");
-                        break;
-                    }
-                }
-            }
-            SharedPreferences prefs = prefs(context);
-            String existingServer = prefs.getString(KEY_SERVER, "");
-            if (existingServer != null && !existingServer.isEmpty()) {
-                // 已经配过：只补 token（用户可能换了 token 但从远程页进来的）
-                if (token != null && !token.isEmpty()) {
-                    prefs.edit().putString(KEY_TOKEN, token).apply();
-                }
-                return;
-            }
-            prefs.edit()
-                    .putString(KEY_SERVER, server)
-                    .putString(KEY_TOKEN, token == null ? "" : token)
-                    .apply();
-        } catch (Exception ignored) {
-            // 地址解析失败就当作没配过
+        if (target.sameAs(currentProfile(context))) {
+            return false;
         }
+        prefs(context).edit()
+                .putString(KEY_SERVER, target.origin)
+                .putString(KEY_TOKEN, target.token)
+                .apply();
+        return true;
     }
 }

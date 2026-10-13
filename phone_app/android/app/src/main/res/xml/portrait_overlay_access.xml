@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/portrait_overlay_access_description"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:packageNames="com.sakura.remote"
+    android:canRetrieveWindowContent="false"
+    android:canPerformGestures="false"
+    android:canRequestFilterKeyEvents="false"
+    android:canRequestTouchExplorationMode="false"
+    android:canTakeScreenshot="false"
+    android:notificationTimeout="0" />

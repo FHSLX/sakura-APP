@@ -1,0 +1,2 @@
+// stray probe file: creation is allowed, deletion is blocked by a directory-level
+// deny entry for Everyone. Harmless; excluded from release packaging.

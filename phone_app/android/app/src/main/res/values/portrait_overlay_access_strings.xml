@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="portrait_overlay_access_label">Sakura 立绘不透明穿透</string>
+    <string name="portrait_overlay_access_description">仅为桌面立绘提供不透明悬浮窗：点人物交互，点透明位置操作桌面。不读取其他应用界面，不监听操作，不代替点击，不截屏。需您手动启用，可随时关闭。</string>
+</resources>

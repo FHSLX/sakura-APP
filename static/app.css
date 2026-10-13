@@ -88,7 +88,6 @@ html, body {
   --pet-lift: 0px;
   transform: translateY(var(--pet-lift));
   transition: opacity 260ms ease;
-  animation: breathe 4.2s ease-in-out infinite;
   will-change: transform, opacity;
   /*
    * 关掉 WebView 的默认触摸反馈。
@@ -107,25 +106,6 @@ html, body {
 }
 
 #portrait.switching { opacity: 0; }
-#portrait.speaking { animation: speak 1.1s ease-in-out infinite; }
-
-/*
- * 上下浮动（呼吸感）。
- *
- * 幅度从 ±10px 提到 ±18px：原来的幅度只占屏幕高约 1%，在手机上看几乎察觉不到，
- * 用户会以为「开关没生效」（实测功能本身正常，就是看不出来）。
- * 周期也从 5.5s 收到 4.2s，动静更明确一点，但仍保持「缓慢呼吸」的观感。
- */
-@keyframes breathe {
-  0%, 100% { --pet-lift: 0px; }
-  50% { --pet-lift: -18px; }
-}
-
-/* 说话时的轻微起伏，比呼吸快、幅度小 */
-@keyframes speak {
-  0%, 100% { --pet-lift: 0px; }
-  50% { --pet-lift: -9px; }
-}
 
 /* ---- 悬浮窗模式（?mode=overlay）----
  *
@@ -551,6 +531,12 @@ body.bubble-mode.dragging #portrait {
   filter: none;
 }
 
+/* Static precision mask needs no animated shadow or permanently promoted image. */
+body.overlay-mode.pass-through-active #portrait {
+  filter: none;
+  will-change: auto;
+}
+
 /* 气泡本身居中靠下排列（助手气泡靠左但整体居中收窄） */
 body.overlay-mode .bubbleRow {
   justify-content: center;
@@ -924,6 +910,26 @@ body.no-float #portrait {
   transform: translate(var(--pet-pan-x, 0px), var(--pet-pan-y, 0px));
 }
 
+/* ---- 精确局部穿透（Android13+ setTouchableRegion）----
+ *
+ * 开启穿透时必须冻结立绘的位移动画与过渡：
+ *   - breathe / speak 会让 --pet-lift 在 0..-18px 之间变化，
+ *     静态 alpha 轮廓会与当前渲染错位；
+ *   - transform 过渡（240/280ms）会让「算轮廓的那一刻」和
+ *     「手指按下的那一刻」不是同一个几何。
+ * 冻结后 --pet-lift 取默认 0px，轮廓与显示严格一致。
+ * 缩放/拖动/上下位置微调仍然可用（它们改的是 mask 输入，不是被冻结的量）。
+ *
+ * TS-03 语义：提交的输入区域是**外轮廓**（每行最左→最右不透明格子的一条带），
+ * 因此立绘外部的透明区穿透，头发缝隙/内部空隙不穿透。这里不改可见性，
+ * 只保证轮廓与渲染严格同帧一致。
+ */
+body.pass-through-active #portrait,
+body.pass-through-active #portraitWrap {
+  animation: none !important;
+  transition: none !important;
+}
+
 /* 字体大小：只影响对话框里的文字 */
 body.overlay-mode #msgBody {
   font-size: calc(15px * var(--pet-font-scale, 1));
@@ -937,10 +943,23 @@ body.overlay-mode #msgName {
   font-size: calc(12px * var(--pet-font-scale, 1));
 }
 
-/* 对话框位置微调（像素） */
+/* 对话框位置微调（像素）
+ *
+ * 横向**必须保留基础规则的 `margin: 0 auto` 居中**。
+ * 旧实现这里写 `margin-left: var(--pet-dialog-x, 0px)`：默认值 0px 会覆盖
+ * `auto`，卡片被推到容器左边 —— 这正是真机「对话框偏左下」的根因。
+ *
+ * 改用 position: relative + left/top：
+ *   - 视觉位移与滑块语义一致（正值向右/向下），不参与 flex 布局计算；
+ *   - 居中的 margin auto 完全不受影响，默认 0 时就是正中间；
+ *   - 不再用 margin-bottom 做纵向微调 —— 那只会把后面的输入栏往下推，
+ *     卡片自身不动，窗口高度固定时还会把输入栏挤出可视区。
+ *   - 与 .auto-hidden 的 transform: translateY(6px) 不冲突（分属两个属性）。
+ */
 body.overlay-mode #msgNav {
-  margin-left: var(--pet-dialog-x, 0px);
-  margin-bottom: var(--pet-dialog-y, 0px);
+  position: relative;
+  left: var(--pet-dialog-x, 0px);
+  top: var(--pet-dialog-y, 0px);
 }
 
 /* ---- 单句气泡 + 历史切换（只在悬浮模式）----
