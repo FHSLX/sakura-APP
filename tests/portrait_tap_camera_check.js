@@ -395,6 +395,7 @@ async function main() {
     wrap.dispatch('touchstart', { touches: [touch(30, 40, 530, 560)], preventDefault() {} });
     check('按下后登记1500ms长按计时', scheduler.pending(1500) >= 1, scheduler.pending(1500));
     scheduler.fire(1500);
+    check('长按确实打开设置', app.state.configOpen === true);
     wrap.dispatch('touchend', { touches: [], preventDefault() {} });
     check('长按抬手不算轻点', taps.length === 0, taps);
   }
