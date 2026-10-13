@@ -449,6 +449,14 @@ public class MainActivity extends BridgeActivity
                 + ",\"enabled\":false,\"host\":\"app\"}";
     }
 
+    @Override public boolean portraitAccessibilityConnected() {
+        return PortraitOverlayAccess.isConnected();
+    }
+
+    @Override public void requestPortraitAccessibilitySettings() {
+        runOnUiThread(() -> PortraitOverlayAccess.openSettings(this));
+    }
+
     // ---- 显示 / 穿透偏好（App ↔ 运行中悬浮窗）----------------------
 
     @Override

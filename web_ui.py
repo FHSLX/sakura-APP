@@ -232,12 +232,19 @@ _PAGE = """<!doctype html>
         <button id="chatButton" class="ghostButton" type="button">收起 App，回桌面看立绘</button>
         <button id="miniConfigButton" class="ghostButton" type="button">缩小成圆形小球</button>
         <button id="batteryButton" class="ghostButton" type="button">申请后台保活</button>
-        <label class="switchRow" for="passThroughToggle">
+          <div id="portraitAccessibilityGuide" class="settingHint hidden" role="note">
+            <strong>首次使用桌面立绘</strong>
+            <p id="portraitAccessibilityGuideText">要让人物和对话框不变淡，同时让外部透明处可点击桌面，请在系统无障碍服务中开启“Sakura 立绘不透明穿透”。安装 App 不会自动开启这项授权。服务不读取界面、不模拟点击、不截屏。</p>
+            <p>长按人物约 1.5 秒即可打开设置；拖动人物不会打开设置。</p>
+            <button id="portraitAccessibilitySettings" type="button" class="miniButton">前往系统无障碍设置</button>
+            <button id="portraitAccessibilityGuideDismiss" type="button" class="miniButton">知道了</button>
+          </div>
+          <label class="switchRow" for="passThroughToggle">
           <input id="passThroughToggle" type="checkbox">
           <span>透明处点击穿透（Android 13+）</span>
         </label>
         <div class="settingHint" id="passThroughHint">
-          开启后，立绘 PNG 的透明位置会直接把轻点交给下层桌面或应用，
+            开启后，立绘外轮廓以外的透明位置会直接把轻点交给下层桌面或应用，
           人物本体与输入框照常可点。需要 Android 13 及以上；旧系统只提示不支持，
           不会用整窗穿透冒充。
         </div>

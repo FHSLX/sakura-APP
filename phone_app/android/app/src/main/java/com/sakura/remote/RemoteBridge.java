@@ -156,6 +156,10 @@ public class RemoteBridge {
         /** 精确穿透的当前状态（JSON），供界面显示。 */
         String touchRegionStatus();
 
+        default boolean portraitAccessibilityConnected() { return false; }
+
+        default void requestPortraitAccessibilitySettings() { }
+
         // ---- 渲染可用性信号（FIX-BLANK-01 / FIX-RUNTIME-01）----
         //
         // 注意：网页上报的 bootOk / bootFailed / portraitVisible / pageSession
@@ -173,6 +177,16 @@ public class RemoteBridge {
     }
 
     private final Host host;
+
+    @JavascriptInterface
+    public boolean portraitAccessibilityConnected() {
+        return host.portraitAccessibilityConnected();
+    }
+
+    @JavascriptInterface
+    public void requestPortraitAccessibilitySettings() {
+        host.requestPortraitAccessibilitySettings();
+    }
     private DiagnosticsProvider diagnosticsProvider;
     /**
      * 渲染信号的**主线程路由器**（FIX-RUNTIME-01）。

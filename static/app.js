@@ -995,14 +995,14 @@ if (typeof window !== 'undefined') {
   window.SakuraDisplayPreferences = { apply: applyNativeDisplayPreferences };
 }
 
-/* ---------- 悬浮窗手势：按住拖动 / 静置 5 秒开设置 ---------- */
+/* ---------- 悬浮窗手势：按住拖动 / 静置1.5秒开设置 ---------- */
 
 /**
  * 拖动与开设置都绑在立绘上。
  *
  * 规则（长按是同一个起手式）：
  *   - 按住后移动超过阈值  → 拖动窗口（发给原生 moveBy）
- *   - 按住不动满 5 秒     → 打开配置页
+ *   - 按住不动约1.5秒     → 打开配置页
  *   - 只是轻点            → 显示/隐藏对话框
  *
  * 为什么拖动放在网页侧：去掉原生标题栏后窗口就没有自带拖动区了，
@@ -1014,7 +1014,7 @@ function installOverlayGestures() {
   if (!target || !native || typeof native.moveBy !== 'function') return;
 
   const DRAG_THRESHOLD = 6;    // px，超过才算拖动
-  const HOLD_MS = 5000;        // 静置多久开设置
+  const HOLD_MS = 1500;        // 静置约1.5秒开设置，与小球一致
 
   let holding = false;
   let dragging = false;
@@ -1230,7 +1230,7 @@ function installOverlayGestures() {
     }
     holdTimer = setTimeout(() => {
       if (!dragging) {
-        // 静置满 5 秒：开设置
+        // 静置约1.5秒：开设置
         holding = false;
         longPressed = true;
         clearPressFeedback();
@@ -1813,7 +1813,7 @@ function closeMediaMenu() {
  * 需要区分三种手势：
  *   轻点人物本体  → 收放对话框
  *   按住人物本体  → 轻微放大（体感反馈，设置里可关）
- *   拖动          → 移动窗口（长按 5 秒则是打开设置）
+ *   拖动          → 移动窗口（长按1.5秒则是打开设置）
  *
  * 曾经还有第四种：点透明处把这一下让给桌面图标。那套机制**已整个去掉** ——
  * 它依赖 WindowManager 的 FLAG_NOT_TOUCHABLE，而 Android 在手势开始时就读定了
@@ -2294,7 +2294,7 @@ function applyBubbleMode() {
  * 小球的手势：轻点恢复、长按开设置、拖动移动位置。
  *
  * 为什么不复用 installOverlayGestures：那个函数把「轻点」留给语音解锁、
- * 并且会做 5 秒长按。小球是独立的小窗口，语义不同 ——
+ * 并且会处理长按。小球是独立的小窗口，语义不同 ——
  * 轻点必须立刻恢复，长按只需 1.5 秒就能叫出设置（小球上不好按太久）。
  * 拖动同样按帧合并，理由与悬浮窗拖动一致（每帧一次跨进程调用）。
  */
@@ -2911,12 +2911,59 @@ function isInsideApp() {
   return !!nativeBridge();
 }
 
+function renderPortraitAccessibilityGuide() {
+  const guide = document.getElementById('portraitAccessibilityGuide');
+  const native = window.SakuraNative;
+  const available = !!(native && typeof native.portraitAccessibilityConnected === 'function'
+    && typeof native.requestPortraitAccessibilitySettings === 'function' && passThroughSupported());
+  if (!guide) return;
+  guide.classList.toggle('hidden', !available);
+  if (!available) return;
+  let connected = false;
+  try { connected = !!native.portraitAccessibilityConnected(); } catch (_) { }
+  const button = document.getElementById('portraitAccessibilitySettings');
+  if (button) button.classList.toggle('hidden', connected);
+  const text = document.getElementById('portraitAccessibilityGuideText');
+  if (text) text.textContent = connected
+    ? '不透明穿透服务已连接。开启穿透后，人物和对话框保持原不透明度，外部透明处可点击桌面。'
+    : '要让人物和对话框不变淡，同时让外部透明处可点击桌面，请在系统无障碍服务中开启“Sakura 立绘不透明穿透”。安装 App 不会自动开启这项授权。服务不读取界面、不模拟点击、不截屏。';
+}
+
+function installPortraitAccessibilityGuide() {
+  const native = window.SakuraNative;
+  if (!native || typeof native.portraitAccessibilityConnected !== 'function'
+      || typeof native.requestPortraitAccessibilitySettings !== 'function' || !passThroughSupported()) return;
+  const button = document.getElementById('portraitAccessibilitySettings');
+  if (button) button.addEventListener('click', () => {
+    try { native.requestPortraitAccessibilitySettings(); }
+    catch (_) { setStatus('请在系统无障碍中开启 Sakura 立绘不透明穿透。'); }
+  });
+  const key = 'sakura.portraitAccessibilityGuide.v1';
+  const dismiss = document.getElementById('portraitAccessibilityGuideDismiss');
+  let seen = false;
+  try { seen = localStorage.getItem(key) === '1'; } catch (_) { }
+  if (dismiss) {
+    dismiss.classList.toggle('hidden', seen);
+    dismiss.addEventListener('click', () => {
+      try { localStorage.setItem(key, '1'); } catch (_) { }
+      dismiss.classList.add('hidden');
+      openConfig(false);
+    });
+  }
+  renderPortraitAccessibilityGuide();
+  if (!seen) openConfig(true);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) renderPortraitAccessibilityGuide();
+  });
+}
+
 function openConfig(open) {
   state.configOpen = !!open;
   if (!el.configPanel) return;
   el.configPanel.classList.toggle('hidden', !state.configOpen);
   if (el.settingsButton) el.settingsButton.classList.toggle('on', state.configOpen);
   if (state.configOpen) {
+    renderPortraitAccessibilityGuide();
     renderConfig();
     loadCharacters();
   }
@@ -5171,6 +5218,7 @@ async function boot() {
     // 绝不留下「看不到内容却拦点击」的透明大窗。
     if (typeof notifyRenderSession === 'function') notifyRenderSession('bootFailed');
   }
+  installPortraitAccessibilityGuide();
   if (wantConfig) openConfig(true);
   // boot 完成（DOM、模式、历史都就绪）：通知原生「页面已就绪」。
   // 注意这只代表 boot 完成，不代表有可见立绘 —— 完整窗口仍等立绘可见信号。

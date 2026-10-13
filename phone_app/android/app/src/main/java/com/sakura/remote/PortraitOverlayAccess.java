@@ -11,6 +11,25 @@ import android.view.accessibility.AccessibilityEvent;
 public final class PortraitOverlayAccess extends AccessibilityService {
     private static volatile PortraitOverlayAccess connected;
 
+    static boolean isConnected() { return connected != null; }
+
+    static void openSettings(Context context) {
+        Intent details = new Intent("android.settings.ACCESSIBILITY_DETAILS_SETTINGS");
+        details.putExtra("android.intent.extra.COMPONENT_NAME",
+                new android.content.ComponentName(context, PortraitOverlayAccess.class));
+        details.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            context.startActivity(details);
+        } catch (RuntimeException unsupported) {
+            try {
+                context.startActivity(new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            } catch (RuntimeException ignored) {
+                android.widget.Toast.makeText(context, "请在系统设置中打开无障碍服务", android.widget.Toast.LENGTH_LONG).show();
+            }
+        }
+    }
+
     static WindowManager windowManager() {
         PortraitOverlayAccess service = connected;
         return service == null ? null

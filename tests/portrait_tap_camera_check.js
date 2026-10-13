@@ -393,8 +393,8 @@ async function main() {
     app.installOverlayGestures();
     const wrap = doc.getElementById('portraitWrap');
     wrap.dispatch('touchstart', { touches: [touch(30, 40, 530, 560)], preventDefault() {} });
-    check('按下后登记 5000ms 长按计时', scheduler.pending(5000) >= 1, scheduler.pending(5000));
-    scheduler.fire(5000);
+    check('按下后登记1500ms长按计时', scheduler.pending(1500) >= 1, scheduler.pending(1500));
+    scheduler.fire(1500);
     wrap.dispatch('touchend', { touches: [], preventDefault() {} });
     check('长按抬手不算轻点', taps.length === 0, taps);
   }

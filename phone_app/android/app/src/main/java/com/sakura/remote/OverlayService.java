@@ -2206,6 +2206,14 @@ public class OverlayService extends Service implements CaptureCoordinator.Target
             return OverlayService.this.touchRegionStatus();
         }
 
+        @Override public boolean portraitAccessibilityConnected() {
+            return PortraitOverlayAccess.isConnected();
+        }
+
+        @Override public void requestPortraitAccessibilitySettings() {
+            handler.post(() -> PortraitOverlayAccess.openSettings(OverlayService.this));
+        }
+
         @Override
         public String displayPreferences() {
             return OverlayService.this.displayPreferences();
